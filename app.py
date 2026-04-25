@@ -497,24 +497,44 @@ def run_backtest_engine(months=12):
     avg_ret  = round(sum(returns)/len(returns),2) if returns else 0
 
     sorted_trades = sorted(trades, key=lambda t: t.get("exit_date",""))
-    cum, pnl_series = 0.0, []
-    for t in sorted_trades:
-        cum += t.get("return_pct", 0)
-        pnl_series.append({"date":t["exit_date"],"cum":round(cum,2),
-                            "ticker":t["ticker"],"ret":t.get("return_pct",0)})
+
+    # Simulated account balance — start with $2,000, risk 20% per trade
+    # Each trade's dollar P&L = (return_pct/100) * (balance * RISK_PCT)
+    # Trades on the same exit date are processed together
+    START_BALANCE = 2_000.0
+    balance = START_BALANCE
+    pnl_series = []
+
+    # Group trades by exit date so same-day exits are applied together
+    from itertools import groupby
+    for exit_date, group in groupby(sorted_trades, key=lambda t: t.get("exit_date","")):
+        day_trades = list(group)
+        for t in day_trades:
+            ret      = t.get("return_pct", 0) / 100.0
+            risk_amt = balance * RISK_PCT          # dollars at risk this trade
+            dollar_pnl = ret * risk_amt            # actual dollar gain/loss
+            balance  = max(balance + dollar_pnl, 1.0)  # floor at $1 to avoid zero
+        pnl_series.append({
+            "date":    exit_date,
+            "balance": round(balance, 2),
+            "ticker":  day_trades[-1]["ticker"],
+            "ret":     day_trades[-1].get("return_pct", 0),
+        })
 
     result = {
-        "period":       f"{start_date} → {end_date}",
-        "trading_days": len(days),
-        "total_trades": len(trades),
-        "win_rate":     win_rate,
-        "avg_return":   avg_ret,
-        "best_trade":   round(max(returns),2) if returns else 0,
-        "worst_trade":  round(min(returns),2) if returns else 0,
-        "total_buys":   len(trades),
-        "pnl_series":   pnl_series,
-        "trades":       sorted_trades,
-        "generated_at": str(datetime.now()),
+        "period":        f"{start_date} → {end_date}",
+        "trading_days":  len(days),
+        "total_trades":  len(trades),
+        "win_rate":      win_rate,
+        "avg_return":    avg_ret,
+        "best_trade":    round(max(returns),2) if returns else 0,
+        "worst_trade":   round(min(returns),2) if returns else 0,
+        "total_buys":    len(trades),
+        "start_balance": START_BALANCE,
+        "end_balance":   round(balance, 2),
+        "pnl_series":    pnl_series,
+        "trades":        sorted_trades,
+        "generated_at":  str(datetime.now()),
     }
     save_json(BACKTEST_FILE, result)
     return result
@@ -887,11 +907,11 @@ body{min-height:100vh;padding-bottom:calc(env(safe-area-inset-bottom) + 16px);}
     <div class="btm"><div class="btml">Total trades</div><div class="btmv" id="bt-tot">—</div></div>
     <div class="btm"><div class="btml">Win rate</div><div class="btmv" id="bt-wr">—</div></div>
     <div class="btm"><div class="btml">Avg return</div><div class="btmv" id="bt-avg">—</div></div>
-    <div class="btm"><div class="btml">Best / worst</div><div class="btmv" id="bt-bw" style="font-size:14px">—</div></div>
+    <div class="btm"><div class="btml">$2k → end balance</div><div class="btmv" id="bt-bal" style="font-size:16px">—</div></div>
   </div>
   <div class="cwrap" id="btcwrap" style="display:none">
     <div class="cbox">
-      <div style="font-size:12px;color:var(--muted);font-family:var(--mono);margin-bottom:12px">Backtest cumulative P&L %</div>
+      <div style="font-size:12px;color:var(--muted);font-family:var(--mono);margin-bottom:12px">Simulated $2,000 account balance · 20% risk per trade</div>
       <div class="carea"><canvas id="btChart" role="img" aria-label="Backtest P&L">No data.</canvas></div>
     </div>
   </div>
@@ -1122,17 +1142,36 @@ async function loadBTResults(){
   const aEl=document.getElementById('bt-avg');
   aEl.textContent=(d.avg_return>=0?'+':'')+d.avg_return+'%';
   aEl.className='btmv '+(d.avg_return>0?'pos':d.avg_return<0?'neg':'');
-  document.getElementById('bt-bw').innerHTML=`<span class="pos">+${d.best_trade}%</span> / <span class="neg">${d.worst_trade}%</span>`;
+  const balEl=document.getElementById('bt-bal');
+  const endBal=d.end_balance||0;
+  const startBal=d.start_balance||2000;
+  balEl.textContent='$'+endBal.toLocaleString('en-US',{maximumFractionDigits:0});
+  balEl.className='btmv '+(endBal>startBal?'pos':endBal<startBal?'neg':'');
 
   if(d.pnl_series&&d.pnl_series.length){
     const ctx=document.getElementById('btChart').getContext('2d');
     if(btChart) btChart.destroy();
-    const col=d.avg_return>=0?'#22c55e':'#ef4444';
+    const balances=d.pnl_series.map(p=>p.balance||0);
+    const finalBal=balances[balances.length-1]||startBal;
+    const col=finalBal>=startBal?'#22c55e':'#ef4444';
     btChart=new Chart(ctx,{type:'line',
-      data:{labels:d.pnl_series.map(p=>p.date),datasets:[{data:d.pnl_series.map(p=>p.cum),borderColor:col,backgroundColor:col+'18',fill:true,tension:0.4,pointRadius:2,borderWidth:2}]},
-      options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
-        scales:{x:{ticks:{color:'#6b6b78',font:{family:'DM Mono',size:10},maxTicksLimit:8},grid:{color:'#1a1a1e'}},
-                y:{ticks:{color:'#6b6b78',font:{family:'DM Mono',size:10},callback:v=>v+'%'},grid:{color:'#1a1a1e'}}}}});
+      data:{labels:d.pnl_series.map(p=>p.date),datasets:[{
+        data:balances,
+        borderColor:col,
+        backgroundColor:col+'18',
+        fill:true,tension:0.4,pointRadius:0,borderWidth:2
+      }]},
+      options:{responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false},
+          tooltip:{callbacks:{label:ctx=>'$'+ctx.parsed.y.toLocaleString('en-US',{maximumFractionDigits:0})}}},
+        scales:{
+          x:{ticks:{color:'#6b6b78',font:{family:'DM Mono',size:10},maxTicksLimit:8},grid:{color:'#1a1a1e'}},
+          y:{ticks:{color:'#6b6b78',font:{family:'DM Mono',size:10},
+              callback:v=>'$'+v.toLocaleString('en-US',{maximumFractionDigits:0})},
+            grid:{color:'#1a1a1e'}}
+        }
+      }
+    });
   }
 
   const trades=[...(d.trades||[])].reverse();
