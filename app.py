@@ -26,8 +26,8 @@ SIGNALS_FILE   = DATA_DIR / "signals.json"
 TRADES_FILE    = DATA_DIR / "trades.json"
 BACKTEST_FILE  = DATA_DIR / "backtest.json"
 
-SMALL_TICKERS = ["SOFI", "DKNG"]                          # proven edge only
-BIG_TICKERS   = ["SOFI", "DKNG", "HOOD", "TSLA", "RIOT"]  # 71%/71%/50% leaders + TSLA/RIOT for size
+SMALL_TICKERS = ["SOFI", "DKNG", "HOOD", "RIOT"]           # small account watchlist
+BIG_TICKERS   = ["SOFI", "DKNG", "HOOD", "TSLA", "RIOT", "AFRM", "UPST"]  # big account
 
 SMALL_ACCOUNT  = 2_000
 BIG_ACCOUNT    = 20_000
@@ -41,16 +41,16 @@ EARNINGS_MIN   = 3
 EARNINGS_MAX   = 7
 START_DATE     = "2020-01-01"
 
-# ── TIGHTENED SIGNAL FILTERS ─────────────────────────────────────────────────
+# ── SIGNAL FILTERS ────────────────────────────────────────────────────────────
 MIN_PRICE        = 6.0    # skip sub-$6 tickers (wide spreads, poor liquidity)
-MIN_PULLBACK_PCT = 0.03   # pullback from recent high must be at least 3%
-MAX_PULLBACK_PCT = 0.12   # but not more than 12% (that's a breakdown, not a dip)
-MIN_RSI          = 38     # not in freefall
-MAX_RSI          = 68     # not overbought
-MIN_VOL_RATIO    = 0.8    # volume at least 80% of 20d avg (avoid dead days)
-MA_SLOPE_DAYS    = 5      # MA must be rising over last N days (confirmed uptrend)
-MIN_ABOVE_MA_PCT = 0.02   # price must be at least 2% above MA (not barely touching)
-MIN_MOMENTUM_PCT = 0.05   # stock must be up at least 5% over past 20 days (has real momentum)
+MIN_PULLBACK_PCT = 0.02   # pullback from recent high at least 2%
+MAX_PULLBACK_PCT = 0.15   # not more than 15% — that's a breakdown
+MIN_RSI          = 33     # not in freefall
+MAX_RSI          = 74     # not overbought
+MIN_VOL_RATIO    = 0.5    # volume at least 50% of 20d avg
+MA_SLOPE_DAYS    = 5      # MA must be rising over last N days
+MIN_ABOVE_MA_PCT = 0.01   # price at least 1% above MA
+MIN_MOMENTUM_PCT = 0.0    # removed momentum floor — MA slope handles this already
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -185,14 +185,14 @@ def call_hedge_signal(ticker, account_size, df=None, as_of_date=None):
                     "detail": f"Volume too low ({vol_ratio:.1f}x avg, need {MIN_VOL_RATIO}x)",
                     "account": "small" if account_size == SMALL_ACCOUNT else "big"}
 
-        # ── Filter 4: 20-day momentum — stock must already be moving up ────────
+        # ── Filter 4: not in a downtrend over 20 days ─────────────────────────
         if len(close) >= 21:
-            price_20d_ago  = float(close.iloc[-21])
-            momentum_20d   = (price - price_20d_ago) / price_20d_ago
-            if momentum_20d < MIN_MOMENTUM_PCT:
+            price_20d_ago = float(close.iloc[-21])
+            momentum_20d  = (price - price_20d_ago) / price_20d_ago
+            if momentum_20d < -0.15:   # stock down more than 15% in 20 days = downtrend, skip
                 return {"ticker": ticker, "strategy": "CALL+HEDGE", "is_buy": False,
                         "price": round(price, 2),
-                        "detail": f"20d momentum {momentum_20d*100:.1f}% below min {MIN_MOMENTUM_PCT*100:.0f}%",
+                        "detail": f"20d trend {momentum_20d*100:.1f}% — stock in downtrend",
                         "account": "small" if account_size == SMALL_ACCOUNT else "big"}
 
         for w in MA_WINDOWS:
@@ -421,17 +421,21 @@ def close_expired_trades(trades):
 
 # ── BACKTEST ENGINE ───────────────────────────────────────────────────────────
 
-def run_backtest_engine(months=2):
+def run_backtest_engine(months=12):
     end_date   = date.today() - timedelta(days=1)
     start_date = end_date - timedelta(days=months * 31)
     days       = trading_days_in_range(start_date, end_date)
 
-    backtest_status["progress"] = "Downloading price data…"
+    log.info(f"Backtest: {start_date} → {end_date} ({len(days)} trading days, {months} months)")
+    backtest_status["progress"] = f"Downloading price data for {months}-month backtest…"
+
+    # Fetch enough history for MA calculations (need 60+ days before start)
+    fetch_start = (start_date - timedelta(days=120)).strftime("%Y-%m-%d")
     price_cache = {}
     all_tickers = list(set(SMALL_TICKERS + BIG_TICKERS))
     for i, ticker in enumerate(all_tickers):
         backtest_status["progress"] = f"Downloading {ticker} ({i+1}/{len(all_tickers)})…"
-        df = get_prices(ticker, start="2019-01-01")
+        df = get_prices(ticker, start=fetch_start)
         if df is not None:
             price_cache[ticker] = add_ma(df, MA_WINDOWS)
 
@@ -515,7 +519,7 @@ def run_backtest_engine(months=2):
     save_json(BACKTEST_FILE, result)
     return result
 
-def run_backtest_thread(months=2):
+def run_backtest_thread(months=12):
     if not backtest_lock.acquire(blocking=False):
         return
     backtest_status.update({"running":True,"done":False})
@@ -642,7 +646,7 @@ def api_summary():
 @app.route("/api/backtest/run",methods=["POST"])
 def api_backtest_run():
     if backtest_status["running"]: return jsonify({"error":"Already running"}),429
-    months = int(request.json.get("months",2)) if request.is_json else 2
+    months = int(request.json.get("months",12)) if request.is_json else 12
     threading.Thread(target=run_backtest_thread,args=(months,),daemon=True).start()
     return jsonify({"ok":True})
 
@@ -871,10 +875,10 @@ body{min-height:100vh;padding-bottom:calc(env(safe-area-inset-bottom) + 16px);}
   <div class="btctrl">
     <span style="font-size:13px;color:var(--muted);font-family:var(--mono)">Period:</span>
     <select class="btsel" id="btmonths">
-      <option value="1">Last 1 month</option>
-      <option value="2" selected>Last 2 months</option>
+      <option value="2">Last 2 months</option>
       <option value="3">Last 3 months</option>
       <option value="6">Last 6 months</option>
+      <option value="12" selected>Last 12 months</option>
     </select>
     <button class="btbtn" id="btbtn" onclick="runBacktest()">Run backtest ↗</button>
   </div>
