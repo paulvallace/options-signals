@@ -26,8 +26,8 @@ SIGNALS_FILE   = DATA_DIR / "signals.json"
 TRADES_FILE    = DATA_DIR / "trades.json"
 BACKTEST_FILE  = DATA_DIR / "backtest.json"
 
-SMALL_TICKERS = ["PLTR", "SOFI", "CHWY", "NIO", "ROKU"]
-BIG_TICKERS   = ["TSLA", "RIOT", "MARA", "AFRM", "UPST", "HOOD", "PLTR", "DKNG", "SNAP", "NIO"]
+SMALL_TICKERS = ["SOFI", "ROKU", "RIOT", "MARA", "SNAP"]
+BIG_TICKERS   = ["TSLA", "RIOT", "MARA", "AFRM", "UPST", "HOOD", "DKNG", "SNAP"]
 
 SMALL_ACCOUNT  = 2_000
 BIG_ACCOUNT    = 20_000
@@ -40,6 +40,16 @@ STRAD_COST_PCT = 0.08
 EARNINGS_MIN   = 3
 EARNINGS_MAX   = 7
 START_DATE     = "2020-01-01"
+
+# ── TIGHTENED SIGNAL FILTERS ─────────────────────────────────────────────────
+MIN_PRICE        = 6.0    # skip sub-$6 tickers (wide spreads, poor liquidity)
+MIN_PULLBACK_PCT = 0.03   # pullback from recent high must be at least 3%
+MAX_PULLBACK_PCT = 0.12   # but not more than 12% (that's a breakdown, not a dip)
+MIN_RSI          = 38     # not in freefall
+MAX_RSI          = 68     # not overbought
+MIN_VOL_RATIO    = 0.8    # volume at least 80% of 20d avg (avoid dead days)
+MA_SLOPE_DAYS    = 5      # MA must be rising over last N days (confirmed uptrend)
+MIN_ABOVE_MA_PCT = 0.02   # price must be at least 2% above MA (not barely touching)
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -120,6 +130,14 @@ def trading_days_in_range(start_date, end_date):
         cur += timedelta(days=1)
     return days
 
+def calc_rsi(close, period=14):
+    """Wilder RSI on a price series."""
+    delta = close.diff()
+    gain  = delta.clip(lower=0).rolling(period).mean()
+    loss  = (-delta.clip(upper=0)).rolling(period).mean()
+    rs    = gain / loss.replace(0, np.nan)
+    return 100 - (100 / (1 + rs))
+
 # ── SIGNAL GENERATORS ─────────────────────────────────────────────────────────
 
 def call_hedge_signal(ticker, account_size, df=None, as_of_date=None):
@@ -137,35 +155,94 @@ def call_hedge_signal(ticker, account_size, df=None, as_of_date=None):
         else:
             df_slice = df
 
-        close = _ensure_series(df_slice["Close"]).astype(float)
-        price = float(close.iloc[-1])
+        close  = _ensure_series(df_slice["Close"]).astype(float)
+        volume = _ensure_series(df_slice["Volume"]).astype(float)
+        price  = float(close.iloc[-1])
+
+        # ── Filter 1: minimum price ──────────────────────────────────────────
+        if price < MIN_PRICE:
+            return {"ticker": ticker, "strategy": "CALL+HEDGE", "is_buy": False,
+                    "price": round(price, 2), "detail": f"Price ${price:.2f} below minimum ${MIN_PRICE}",
+                    "account": "small" if account_size == SMALL_ACCOUNT else "big"}
+
+        # ── Filter 2: RSI ─────────────────────────────────────────────────────
+        rsi_series = calc_rsi(close)
+        rsi = float(rsi_series.iloc[-1]) if not pd.isna(rsi_series.iloc[-1]) else 50
+        if not (MIN_RSI <= rsi <= MAX_RSI):
+            return {"ticker": ticker, "strategy": "CALL+HEDGE", "is_buy": False,
+                    "price": round(price, 2),
+                    "detail": f"RSI {rsi:.0f} outside range {MIN_RSI}–{MAX_RSI}",
+                    "account": "small" if account_size == SMALL_ACCOUNT else "big"}
+
+        # ── Filter 3: volume confirmation ─────────────────────────────────────
+        vol_today  = float(volume.iloc[-1])
+        vol_20avg  = float(volume.iloc[-21:-1].mean()) if len(volume) >= 21 else vol_today
+        vol_ratio  = vol_today / vol_20avg if vol_20avg > 0 else 1.0
+        if vol_ratio < MIN_VOL_RATIO:
+            return {"ticker": ticker, "strategy": "CALL+HEDGE", "is_buy": False,
+                    "price": round(price, 2),
+                    "detail": f"Volume too low ({vol_ratio:.1f}x avg, need {MIN_VOL_RATIO}x)",
+                    "account": "small" if account_size == SMALL_ACCOUNT else "big"}
 
         for w in MA_WINDOWS:
             ma_col = f"MA_{w}"
             if ma_col not in df_slice.columns:
                 continue
-            ma_today = float(df_slice[ma_col].iloc[-1])
-            if pd.isna(ma_today) or price <= ma_today:
-                continue
-            recent = close.iloc[-5:]
-            if not (recent.max() > price and recent.iloc[-2] > price):
+            ma_series = _ensure_series(df_slice[ma_col]).astype(float)
+            ma_today  = float(ma_series.iloc[-1])
+            if pd.isna(ma_today):
                 continue
 
+            # ── Filter 4: price meaningfully above MA ─────────────────────────
+            above_pct = (price - ma_today) / ma_today
+            if above_pct < MIN_ABOVE_MA_PCT:
+                continue
+
+            # ── Filter 5: MA slope is rising ──────────────────────────────────
+            if len(ma_series.dropna()) < MA_SLOPE_DAYS + 1:
+                continue
+            ma_prev = float(ma_series.dropna().iloc[-(MA_SLOPE_DAYS + 1)])
+            if ma_today <= ma_prev:
+                continue
+
+            # ── Filter 6: meaningful pullback from recent high ────────────────
+            lookback   = close.iloc[-10:]
+            recent_high = float(lookback.max())
+            pullback_pct = (recent_high - price) / recent_high
+
+            if pullback_pct < MIN_PULLBACK_PCT:
+                continue  # barely any dip — not a real pullback
+            if pullback_pct > MAX_PULLBACK_PCT:
+                continue  # too much damage — this isn't a dip, it's a breakdown
+
+            # ── Filter 7: previous day was also down (confirming dip) ─────────
+            if len(close) < 3:
+                continue
+            prev_close = float(close.iloc[-2])
+            if prev_close >= price * 1.005:
+                pass  # prev day higher = currently pulling back, good
+            # Allow signal if today is the dip day regardless
+
+            # ── All filters passed ────────────────────────────────────────────
             risk_budget       = account_size * RISK_PCT
             cost_per_contract = CALL_COST_PCT * price * 100
             max_contracts     = int(risk_budget // cost_per_contract) if cost_per_contract > 0 else 0
 
             return {
                 "ticker": ticker, "strategy": "CALL+HEDGE", "is_buy": True,
-                "price": round(price, 2), "ma_window": w, "hold_days": HOLD_DAYS,
+                "price": round(price, 2), "ma_window": w,
+                "hold_days": HOLD_DAYS,
                 "call_cost_pct": CALL_COST_PCT, "put_cost_pct": PUT_COST_PCT,
                 "max_contracts": max_contracts, "risk_budget": round(risk_budget, 2),
-                "detail": f"Above MA{w} with pullback · hold {HOLD_DAYS}d · hedge at +20%",
+                "rsi": round(rsi, 1), "pullback_pct": round(pullback_pct * 100, 1),
+                "vol_ratio": round(vol_ratio, 1),
+                "detail": (f"MA{w} uptrend · {pullback_pct*100:.1f}% pullback · "
+                           f"RSI {rsi:.0f} · vol {vol_ratio:.1f}x · hold {HOLD_DAYS}d"),
                 "account": "small" if account_size == SMALL_ACCOUNT else "big",
             }
 
         return {"ticker": ticker, "strategy": "CALL+HEDGE", "is_buy": False,
-                "price": round(price, 2), "detail": "No signal — conditions not met",
+                "price": round(price, 2), "detail": "No signal — filters not met",
                 "account": "small" if account_size == SMALL_ACCOUNT else "big"}
 
     except Exception as e:
@@ -187,18 +264,43 @@ def straddle_signal(ticker, df=None, as_of_date=None, next_earnings=None):
         else:
             close = _ensure_series(df["Close"]).astype(float)
 
-        price     = float(close.iloc[-1])
+        price = float(close.iloc[-1])
+
+        # Min price filter
+        if price < MIN_PRICE:
+            return {"ticker": ticker, "strategy": "STRADDLE", "is_buy": False,
+                    "price": round(price, 2), "detail": f"Price below ${MIN_PRICE} minimum",
+                    "account": "big"}
+
+        # Volatility sweet spot: need SOME vol for a straddle to pay off,
+        # but not so much that premium is already priced in
         recent    = close.iloc[-10:]
         pct_range = (recent.max() - recent.min()) / recent.iloc[-1]
-        if pct_range > 0.08:
+        if pct_range < 0.03:
             return {"ticker": ticker, "strategy": "STRADDLE", "is_buy": False,
-                    "price": round(price, 2), "detail": "Too volatile recently", "account": "big"}
+                    "price": round(price, 2), "detail": "Too quiet — not enough volatility for a straddle",
+                    "account": "big"}
+        if pct_range > 0.15:
+            return {"ticker": ticker, "strategy": "STRADDLE", "is_buy": False,
+                    "price": round(price, 2), "detail": "Too volatile — premium already expensive",
+                    "account": "big"}
 
+        # RSI filter — avoid entering into extreme moves
+        rsi_series = calc_rsi(close)
+        rsi = float(rsi_series.iloc[-1]) if not pd.isna(rsi_series.iloc[-1]) else 50
+        if rsi < 30 or rsi > 75:
+            return {"ticker": ticker, "strategy": "STRADDLE", "is_buy": False,
+                    "price": round(price, 2),
+                    "detail": f"RSI {rsi:.0f} extreme — wait for calm before earnings",
+                    "account": "big"}
+
+        # Earnings filter
         if next_earnings is None:
             next_earnings = get_next_earnings(ticker)
         if next_earnings is None:
             return {"ticker": ticker, "strategy": "STRADDLE", "is_buy": False,
-                    "price": round(price, 2), "detail": "No upcoming earnings date", "account": "big"}
+                    "price": round(price, 2), "detail": "No upcoming earnings date",
+                    "account": "big"}
 
         ref_date = as_of_date if as_of_date else date.today()
         delta    = (next_earnings - ref_date).days
@@ -217,7 +319,9 @@ def straddle_signal(ticker, df=None, as_of_date=None, next_earnings=None):
             "price": round(price, 2), "hold_days": 5, "strad_cost_pct": STRAD_COST_PCT,
             "earnings_date": str(next_earnings), "days_to_earnings": delta,
             "max_contracts": max_contracts, "risk_budget": round(risk_budget, 2),
-            "detail": f"Earnings in {delta}d · hold 5d · {int(STRAD_COST_PCT*100)}% cost",
+            "rsi": round(rsi, 1), "vol_range_pct": round(pct_range * 100, 1),
+            "detail": (f"Earnings in {delta}d · 10d range {pct_range*100:.1f}% · "
+                       f"RSI {rsi:.0f} · hold 5d"),
             "account": "big",
         }
     except Exception as e:
@@ -264,14 +368,25 @@ def simulate_trade_return(trade, price_df):
         log.warning(f"simulate_trade_return: {e}")
         return None
 
+def trading_days_elapsed(entry_date_str, today=None):
+    """Count actual trading days (weekdays) between entry and today."""
+    entry = date.fromisoformat(entry_date_str)
+    end   = today or date.today()
+    count, cur = 0, entry + timedelta(days=1)
+    while cur <= end:
+        if cur.weekday() < 5:
+            count += 1
+        cur += timedelta(days=1)
+    return count
+
 def close_expired_trades(trades):
     today_str   = str(date.today())
     open_trades, closed = [], []
     for t in trades:
         if t.get("status") != "open":
             closed.append(t); continue
-        entry = date.fromisoformat(t["entry_date"])
-        if (date.today() - entry).days < t.get("hold_days", HOLD_DAYS):
+        held = trading_days_elapsed(t["entry_date"])
+        if held < t.get("hold_days", HOLD_DAYS):
             open_trades.append(t); continue
         ep         = t["entry_price"]
         exit_price = get_current_price(t["ticker"]) or ep
@@ -770,6 +885,19 @@ async function loadSignals(ds){
     </div>`).join('');
 }
 
+function tradingDaysElapsed(entryDateStr) {
+  const entry = new Date(entryDateStr);
+  const today = new Date();
+  let count = 0, cur = new Date(entry);
+  cur.setDate(cur.getDate() + 1);
+  while (cur <= today) {
+    const d = cur.getDay();
+    if (d !== 0 && d !== 6) count++;
+    cur.setDate(cur.getDate() + 1);
+  }
+  return count;
+}
+
 async function loadTrades(){
   const trades=await(await fetch('/api/trades')).json();
   const open=trades.filter(t=>t.status==='open');
@@ -777,8 +905,8 @@ async function loadTrades(){
   const td=new Date().toISOString().slice(0,10);
   document.getElementById('openlist').innerHTML=!open.length?'<div class="empty">No open trades.</div>':
     open.map(t=>{
-      const held=Math.round((new Date(td)-new Date(t.entry_date))/86400000);
-      const pct=Math.min(held/t.hold_days*100,100);
+      const held = tradingDaysElapsed(t.entry_date);
+      const pct  = Math.min(held/t.hold_days*100,100);
       return `<div class="card">
         <div class="cdot" style="background:var(--amber);margin-top:6px"></div>
         <div class="cbody">
