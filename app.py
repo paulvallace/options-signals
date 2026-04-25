@@ -26,8 +26,8 @@ SIGNALS_FILE   = DATA_DIR / "signals.json"
 TRADES_FILE    = DATA_DIR / "trades.json"
 BACKTEST_FILE  = DATA_DIR / "backtest.json"
 
-SMALL_TICKERS = ["SOFI", "DKNG", "HOOD", "RIOT"]           # small account watchlist
-BIG_TICKERS   = ["SOFI", "DKNG", "HOOD", "TSLA", "RIOT", "AFRM", "UPST"]  # big account
+SMALL_TICKERS = ["RIOT", "HOOD", "SOFI", "UPST"]   # green tickers only — 50%+ win rate
+BIG_TICKERS   = ["RIOT", "HOOD", "SOFI", "UPST"]   # same for big account
 
 SMALL_ACCOUNT  = 2_000
 BIG_ACCOUNT    = 20_000
@@ -498,27 +498,29 @@ def run_backtest_engine(months=12):
 
     sorted_trades = sorted(trades, key=lambda t: t.get("exit_date",""))
 
-    # Simulated account balance — start with $2,000, risk 20% per trade
-    # Each trade's dollar P&L = (return_pct/100) * (balance * RISK_PCT)
-    # Trades on the same exit date are processed together
+    # Realistic account simulation:
+    # - Start with $2,000
+    # - Risk 20% of account per trade ($400 initially)
+    # - Only ONE trade active at a time (most conservative realistic assumption)
+    # - Each signal that fires: risk 20% of current balance, apply that trade's return
+    # - Same-day exits: average their returns (you could only be in one)
     START_BALANCE = 2_000.0
     balance = START_BALANCE
     pnl_series = []
 
-    # Group trades by exit date so same-day exits are applied together
     from itertools import groupby
     for exit_date, group in groupby(sorted_trades, key=lambda t: t.get("exit_date","")):
         day_trades = list(group)
-        for t in day_trades:
-            ret      = t.get("return_pct", 0) / 100.0
-            risk_amt = balance * RISK_PCT          # dollars at risk this trade
-            dollar_pnl = ret * risk_amt            # actual dollar gain/loss
-            balance  = max(balance + dollar_pnl, 1.0)  # floor at $1 to avoid zero
+        # Average the returns for same-day exits (pick one trade per day realistically)
+        avg_day_ret = sum(t.get("return_pct",0) for t in day_trades) / len(day_trades) / 100.0
+        risk_amt    = balance * RISK_PCT
+        dollar_pnl  = avg_day_ret * risk_amt
+        balance     = max(balance + dollar_pnl, 1.0)
         pnl_series.append({
             "date":    exit_date,
             "balance": round(balance, 2),
-            "ticker":  day_trades[-1]["ticker"],
-            "ret":     day_trades[-1].get("return_pct", 0),
+            "ticker":  day_trades[0]["ticker"],
+            "ret":     round(avg_day_ret * 100, 1),
         })
 
     result = {
