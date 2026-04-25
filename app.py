@@ -501,6 +501,49 @@ def api_backtest_results():
     if data is None: return jsonify({"error":"No results yet"}),404
     return jsonify(data)
 
+@app.route("/api/ticker-stats")
+def api_ticker_stats():
+    """Per-ticker win rate, avg return, trade count from all closed trades (live + backtest)."""
+    live_trades = load_json(TRADES_FILE, [])
+    bt_data     = load_json(BACKTEST_FILE, None)
+    bt_trades   = bt_data.get("trades", []) if bt_data else []
+
+    # Merge: prefer backtest for historical depth, live for recency
+    all_closed = [t for t in live_trades if t.get("status") == "closed"] + \
+                 [t for t in bt_trades   if t.get("status") == "closed"]
+
+    stats = {}
+    for t in all_closed:
+        key = t["ticker"]
+        if key not in stats:
+            stats[key] = {"ticker": key, "trades": [], "wins": 0}
+        ret = t.get("return_pct", 0)
+        stats[key]["trades"].append(ret)
+        if ret > 0:
+            stats[key]["wins"] += 1
+
+    result = []
+    for k, v in stats.items():
+        n       = len(v["trades"])
+        wr      = round(v["wins"] / n * 100, 1) if n else 0
+        avg     = round(sum(v["trades"]) / n, 1) if n else 0
+        best    = round(max(v["trades"]), 1) if n else 0
+        worst   = round(min(v["trades"]), 1) if n else 0
+        verdict = "trade"   if wr >= 45 else \
+                  "caution" if wr >= 30 else "skip"
+        result.append({
+            "ticker":   k,
+            "trades":   n,
+            "win_rate": wr,
+            "avg_ret":  avg,
+            "best":     best,
+            "worst":    worst,
+            "verdict":  verdict,
+        })
+
+    result.sort(key=lambda x: x["win_rate"], reverse=True)
+    return jsonify(result)
+
 # ── HTML ──────────────────────────────────────────────────────────────────────
 
 HTML = r"""<!DOCTYPE html>
@@ -595,6 +638,7 @@ body{min-height:100vh;padding-bottom:calc(env(safe-area-inset-bottom) + 16px);}
   <button class="tab" onclick="showTab('closed',this)">History</button>
   <button class="tab" onclick="showTab('chart',this)">P&L chart</button>
   <button class="tab" onclick="showTab('backtest',this)">Backtest ↗</button>
+  <button class="tab" onclick="showTab('stats',this)">Ticker stats</button>
 </div>
 
 <div id="tab-today">
@@ -649,6 +693,18 @@ body{min-height:100vh;padding-bottom:calc(env(safe-area-inset-bottom) + 16px);}
 </div>
 
 <div style="height:16px"></div>
+<div id="tab-stats" style="display:none">
+  <div style="padding:0 20px 8px;font-size:12px;color:var(--muted);font-family:var(--mono)" id="stats-source"></div>
+  <div style="padding:0 20px;display:flex;flex-direction:column;gap:6px" id="stats-list">
+    <div class="empty">Run the backtest first to see per-ticker breakdown.</div>
+  </div>
+  <div style="height:10px"></div>
+  <div style="padding:0 20px;font-size:11px;color:var(--muted);font-family:var(--mono);line-height:1.7">
+    green = trade it (45%+ win rate) &nbsp;·&nbsp; amber = caution &nbsp;·&nbsp; red = skip it
+  </div>
+  <div style="height:16px"></div>
+</div>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script>
 let liveChart=null, btChart=null;
@@ -656,11 +712,12 @@ const today=new Date().toISOString().slice(0,10);
 document.getElementById('dpick').value=today;
 
 function showTab(n,btn){
-  ['today','open','closed','chart','backtest'].forEach(t=>
+  ['today','open','closed','chart','backtest','stats'].forEach(t=>
     document.getElementById('tab-'+t).style.display=t===n?'':'none');
   document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));
   btn.classList.add('active');
   if(n==='chart') drawLiveChart();
+  if(n==='stats') loadTickerStats();
 }
 
 async function runPipeline(){
@@ -825,11 +882,60 @@ async function loadBTResults(){
   }).join('');
 }
 
+async function loadTickerStats(){
+  const r=await fetch('/api/ticker-stats');
+  if(!r.ok) return;
+  const stats=await r.json();
+  if(!stats.length){
+    document.getElementById('stats-list').innerHTML='<div class="empty">Run the backtest first to see per-ticker breakdown.</div>';
+    return;
+  }
+  const total=stats.reduce((a,s)=>a+s.trades,0);
+  document.getElementById('stats-source').textContent=total+' closed trades analysed · sorted by win rate';
+  document.getElementById('stats-list').innerHTML=stats.map(s=>{
+    const col=s.verdict==='trade'?'#22c55e':s.verdict==='caution'?'#f59e0b':'#ef4444';
+    const bgTag=s.verdict==='trade'?'background:#14532d;color:#86efac':
+                s.verdict==='caution'?'background:#451a03;color:#fcd34d':
+                'background:#450a0a;color:#fca5a5';
+    const barW=Math.min(Math.max(s.win_rate,0),100);
+    const avgCol=s.avg_ret>0?'#22c55e':s.avg_ret<0?'#ef4444':'var(--muted)';
+    return `<div class="trow">
+      <div class="cdot" style="width:8px;height:8px;border-radius:50%;background:${col};flex-shrink:0;margin-top:2px"></div>
+      <div style="width:46px;flex-shrink:0;font-size:14px;font-weight:700;font-family:var(--mono);color:var(--text)">${s.ticker}</div>
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+          <div style="flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden">
+            <div style="width:${barW}%;height:5px;background:${col};border-radius:3px"></div>
+          </div>
+          <span style="font-size:12px;font-family:var(--mono);color:${col};font-weight:500;min-width:36px;text-align:right">${s.win_rate}%</span>
+        </div>
+        <div style="font-size:11px;font-family:var(--mono);color:var(--muted)">
+          avg <span style="color:${avgCol}">${s.avg_ret>=0?'+':''}${s.avg_ret}%</span>
+          &nbsp;·&nbsp; best <span style="color:#22c55e">+${s.best}%</span>
+          &nbsp;·&nbsp; worst <span style="color:#ef4444">${s.worst}%</span>
+          &nbsp;·&nbsp; ${s.trades} trades
+        </div>
+      </div>
+      <div style="font-size:10px;font-family:var(--mono);font-weight:500;padding:2px 8px;border-radius:4px;flex-shrink:0;${bgTag}">${s.verdict}</div>
+    </div>`;
+  }).join('');
+}
+
 async function loadAll(){
   await loadStatus();
   await loadSignals(document.getElementById('dpick').value);
   await loadTrades();
   try{const r=await fetch('/api/backtest/results');if(r.ok) loadBTResults();}catch(e){}
+  loadTickerStats();
+}
+
+function showTab(n,btn){
+  ['today','open','closed','chart','backtest','stats'].forEach(t=>
+    document.getElementById('tab-'+t).style.display=t===n?'':'none');
+  document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  if(n==='chart') drawLiveChart();
+  if(n==='stats') loadTickerStats();
 }
 
 loadAll();
