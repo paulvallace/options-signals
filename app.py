@@ -349,16 +349,20 @@ def simulate_trade_return(trade, price_df):
             cost   = trade.get("strad_cost_pct", STRAD_COST_PCT) * ep
             payoff = abs(xp - ep)
         else:
-            cost   = trade.get("call_cost_pct", CALL_COST_PCT) * ep
-            payoff = max(0.0, xp - ep)
-            window        = close.iloc[entry_loc:exit_loc + 1]
-            max_call_ret  = max(0.0, float(window.max()) - ep) / cost if cost > 0 else 0
-            if max_call_ret >= 0.20:
+            call_cost   = trade.get("call_cost_pct", CALL_COST_PCT) * ep
+            call_payoff = max(0.0, xp - ep)
+            window      = close.iloc[entry_loc:exit_loc + 1]
+            max_gain    = max(0.0, float(window.max()) - ep)
+            hedged      = (max_gain / call_cost >= 0.20) if call_cost > 0 else False
+            if hedged:
                 put_cost   = trade.get("put_cost_pct", PUT_COST_PCT) * ep
-                cost      += put_cost
-                payoff    += max(0.0, ep - xp)
+                put_payoff = max(0.0, ep - xp)
+                cost       = call_cost + put_cost
+                payoff     = call_payoff + put_payoff
+            else:
+                cost, payoff = call_cost, call_payoff
 
-        ret = (payoff - cost) / cost if cost else 0
+        ret = max((payoff - cost) / cost, -1.0) if cost else 0
         return {
             "exit_date":  str(close.index[exit_loc].date()),
             "exit_price": round(xp, 2),
@@ -391,10 +395,12 @@ def close_expired_trades(trades):
         ep         = t["entry_price"]
         exit_price = get_current_price(t["ticker"]) or ep
         if t["strategy"] == "STRADDLE":
-            cost, payoff = t.get("strad_cost_pct", STRAD_COST_PCT)*ep, abs(exit_price-ep)
+            cost   = t.get("strad_cost_pct", STRAD_COST_PCT) * ep
+            payoff = abs(exit_price - ep)
         else:
-            cost, payoff = t.get("call_cost_pct", CALL_COST_PCT)*ep, max(0, exit_price-ep)
-        ret = (payoff-cost)/cost if cost else 0
+            cost   = t.get("call_cost_pct", CALL_COST_PCT) * ep
+            payoff = max(0, exit_price - ep)
+        ret = max((payoff - cost) / cost, -1.0) if cost else 0
         t.update({"status":"closed","exit_date":today_str,
                   "exit_price":round(exit_price,2),"return_pct":round(ret*100,2)})
         closed.append(t)
@@ -423,13 +429,16 @@ def run_backtest_engine(months=2):
         backtest_status["progress"] = f"Simulating {sim_date} ({day_i+1}/{len(days)})…"
 
         day_buys = []
+        seen_today = set()  # deduplicate: one signal per ticker per day
+
         for ticker in SMALL_TICKERS:
             if ticker not in price_cache: continue
             sig = call_hedge_signal(ticker, SMALL_ACCOUNT,
                                     df=price_cache[ticker], as_of_date=sim_date)
-            if sig and sig.get("is_buy"):
+            if sig and sig.get("is_buy") and ticker not in seen_today:
                 sig["date"] = str(sim_date)
                 day_buys.append(sig)
+                seen_today.add(ticker)
 
         for ticker in BIG_TICKERS:
             if ticker not in price_cache: continue
@@ -438,12 +447,15 @@ def run_backtest_engine(months=2):
                                     next_earnings=earnings_cache.get(ticker))
             if strad and strad.get("is_buy"):
                 strad["date"] = str(sim_date)
-                day_buys.append(strad)
-            call = call_hedge_signal(ticker, BIG_ACCOUNT,
-                                     df=price_cache[ticker], as_of_date=sim_date)
-            if call and call.get("is_buy"):
-                call["date"] = str(sim_date)
-                day_buys.append(call)
+                day_buys.append(strad)  # straddles are always unique (different strategy)
+
+            if ticker not in seen_today:
+                call = call_hedge_signal(ticker, BIG_ACCOUNT,
+                                         df=price_cache[ticker], as_of_date=sim_date)
+                if call and call.get("is_buy"):
+                    call["date"] = str(sim_date)
+                    day_buys.append(call)
+                    seen_today.add(ticker)
 
         for sig in day_buys:
             ticker = sig["ticker"]
@@ -513,14 +525,28 @@ def run_pipeline():
     today_str = str(date.today())
     try:
         new_signals = []
+        seen_live   = set()
+
         for ticker in SMALL_TICKERS:
             sig = call_hedge_signal(ticker, SMALL_ACCOUNT)
-            if sig: sig["date"] = today_str; new_signals.append(sig)
+            if sig:
+                sig["date"] = today_str
+                new_signals.append(sig)
+                if sig.get("is_buy"):
+                    seen_live.add(ticker)
+
         for ticker in BIG_TICKERS:
             strad = straddle_signal(ticker)
-            if strad: strad["date"] = today_str; new_signals.append(strad)
-            call = call_hedge_signal(ticker, BIG_ACCOUNT)
-            if call: call["date"] = today_str; new_signals.append(call)
+            if strad:
+                strad["date"] = today_str
+                new_signals.append(strad)
+            if ticker not in seen_live:
+                call = call_hedge_signal(ticker, BIG_ACCOUNT)
+                if call:
+                    call["date"] = today_str
+                    new_signals.append(call)
+                    if call.get("is_buy"):
+                        seen_live.add(ticker)
 
         all_signals = [s for s in load_json(SIGNALS_FILE,[]) if s.get("date")!=today_str]
         all_signals.extend(new_signals)
