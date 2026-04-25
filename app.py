@@ -26,8 +26,8 @@ SIGNALS_FILE   = DATA_DIR / "signals.json"
 TRADES_FILE    = DATA_DIR / "trades.json"
 BACKTEST_FILE  = DATA_DIR / "backtest.json"
 
-SMALL_TICKERS = ["SOFI", "ROKU", "RIOT", "MARA", "SNAP"]
-BIG_TICKERS   = ["TSLA", "RIOT", "MARA", "AFRM", "UPST", "HOOD", "DKNG", "SNAP"]
+SMALL_TICKERS = ["SOFI", "DKNG"]                          # proven edge only
+BIG_TICKERS   = ["SOFI", "DKNG", "HOOD", "TSLA", "RIOT"]  # 71%/71%/50% leaders + TSLA/RIOT for size
 
 SMALL_ACCOUNT  = 2_000
 BIG_ACCOUNT    = 20_000
@@ -50,6 +50,7 @@ MAX_RSI          = 68     # not overbought
 MIN_VOL_RATIO    = 0.8    # volume at least 80% of 20d avg (avoid dead days)
 MA_SLOPE_DAYS    = 5      # MA must be rising over last N days (confirmed uptrend)
 MIN_ABOVE_MA_PCT = 0.02   # price must be at least 2% above MA (not barely touching)
+MIN_MOMENTUM_PCT = 0.05   # stock must be up at least 5% over past 20 days (has real momentum)
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -184,6 +185,16 @@ def call_hedge_signal(ticker, account_size, df=None, as_of_date=None):
                     "detail": f"Volume too low ({vol_ratio:.1f}x avg, need {MIN_VOL_RATIO}x)",
                     "account": "small" if account_size == SMALL_ACCOUNT else "big"}
 
+        # ── Filter 4: 20-day momentum — stock must already be moving up ────────
+        if len(close) >= 21:
+            price_20d_ago  = float(close.iloc[-21])
+            momentum_20d   = (price - price_20d_ago) / price_20d_ago
+            if momentum_20d < MIN_MOMENTUM_PCT:
+                return {"ticker": ticker, "strategy": "CALL+HEDGE", "is_buy": False,
+                        "price": round(price, 2),
+                        "detail": f"20d momentum {momentum_20d*100:.1f}% below min {MIN_MOMENTUM_PCT*100:.0f}%",
+                        "account": "small" if account_size == SMALL_ACCOUNT else "big"}
+
         for w in MA_WINDOWS:
             ma_col = f"MA_{w}"
             if ma_col not in df_slice.columns:
@@ -193,35 +204,34 @@ def call_hedge_signal(ticker, account_size, df=None, as_of_date=None):
             if pd.isna(ma_today):
                 continue
 
-            # ── Filter 4: price meaningfully above MA ─────────────────────────
+            # ── Filter 5: price meaningfully above MA ─────────────────────────
             above_pct = (price - ma_today) / ma_today
             if above_pct < MIN_ABOVE_MA_PCT:
                 continue
 
-            # ── Filter 5: MA slope is rising ──────────────────────────────────
+            # ── Filter 6: MA slope is rising ──────────────────────────────────
             if len(ma_series.dropna()) < MA_SLOPE_DAYS + 1:
                 continue
             ma_prev = float(ma_series.dropna().iloc[-(MA_SLOPE_DAYS + 1)])
             if ma_today <= ma_prev:
                 continue
 
-            # ── Filter 6: meaningful pullback from recent high ────────────────
-            lookback   = close.iloc[-10:]
-            recent_high = float(lookback.max())
+            # ── Filter 7: meaningful pullback from recent high ────────────────
+            lookback     = close.iloc[-10:]
+            recent_high  = float(lookback.max())
             pullback_pct = (recent_high - price) / recent_high
 
             if pullback_pct < MIN_PULLBACK_PCT:
-                continue  # barely any dip — not a real pullback
+                continue
             if pullback_pct > MAX_PULLBACK_PCT:
-                continue  # too much damage — this isn't a dip, it's a breakdown
+                continue
 
-            # ── Filter 7: previous day was also down (confirming dip) ─────────
+            # ── Filter 8: previous day must be down (confirming active dip) ───
             if len(close) < 3:
                 continue
             prev_close = float(close.iloc[-2])
-            if prev_close >= price * 1.005:
-                pass  # prev day higher = currently pulling back, good
-            # Allow signal if today is the dip day regardless
+            if prev_close < price:
+                continue  # stock was lower yesterday = already bouncing, missed entry
 
             # ── All filters passed ────────────────────────────────────────────
             risk_budget       = account_size * RISK_PCT
@@ -236,8 +246,11 @@ def call_hedge_signal(ticker, account_size, df=None, as_of_date=None):
                 "max_contracts": max_contracts, "risk_budget": round(risk_budget, 2),
                 "rsi": round(rsi, 1), "pullback_pct": round(pullback_pct * 100, 1),
                 "vol_ratio": round(vol_ratio, 1),
+                "momentum_20d": round(momentum_20d * 100, 1) if len(close) >= 21 else None,
                 "detail": (f"MA{w} uptrend · {pullback_pct*100:.1f}% pullback · "
-                           f"RSI {rsi:.0f} · vol {vol_ratio:.1f}x · hold {HOLD_DAYS}d"),
+                           f"RSI {rsi:.0f} · vol {vol_ratio:.1f}x · "
+                           f"20d momentum {momentum_20d*100:.1f}%" if len(close) >= 21
+                           else f"MA{w} uptrend · {pullback_pct*100:.1f}% pullback · RSI {rsi:.0f}"),
                 "account": "small" if account_size == SMALL_ACCOUNT else "big",
             }
 
@@ -685,6 +698,31 @@ def api_ticker_stats():
     result.sort(key=lambda x: x["win_rate"], reverse=True)
     return jsonify(result)
 
+@app.route("/api/hedge-alerts")
+def api_hedge_alerts():
+    trades     = load_json(TRADES_FILE, [])
+    open_calls = [t for t in trades
+                  if t.get("status")=="open" and t.get("strategy")=="CALL+HEDGE"]
+    alerts = []
+    for t in open_calls:
+        current = get_current_price(t["ticker"])
+        if current is None: continue
+        ep        = t["entry_price"]
+        call_cost = t.get("call_cost_pct", CALL_COST_PCT) * ep
+        call_gain = max(0.0, current - ep)
+        gain_pct  = (call_gain / call_cost * 100) if call_cost > 0 else 0
+        if gain_pct >= 20:
+            alerts.append({
+                "ticker":        t["ticker"],
+                "entry_price":   ep,
+                "current_price": round(current, 2),
+                "gain_pct":      round(gain_pct, 1),
+                "entry_date":    t["entry_date"],
+                "message":       (f"{t['ticker']} call is up {gain_pct:.0f}% — "
+                                  f"buy a PUT now to lock in your profit"),
+            })
+    return jsonify(alerts)
+
 # ── HTML ──────────────────────────────────────────────────────────────────────
 
 HTML = r"""<!DOCTYPE html>
@@ -756,6 +794,23 @@ body{min-height:100vh;padding-bottom:calc(env(safe-area-inset-bottom) + 16px);}
 .btml{font-size:10px;color:var(--muted);font-family:var(--mono);letter-spacing:.05em;text-transform:uppercase;}
 .btmv{font-size:20px;font-weight:700;margin-top:2px;}
 .btlist{padding:0 20px;display:flex;flex-direction:column;gap:6px;max-height:420px;overflow-y:auto;}
+.alert-banner{margin:0 20px 12px;background:#431407;border:1px solid #f97316;border-radius:14px;padding:14px 16px;}
+.alert-title{font-size:13px;font-weight:600;color:#fb923c;font-family:var(--sans);margin-bottom:6px;}
+.alert-item{font-size:12px;color:#fed7aa;font-family:var(--mono);padding:6px 0;border-bottom:0.5px solid #7c2d12;}
+.alert-item:last-child{border-bottom:none;padding-bottom:0;}
+.howto{padding:0 20px;display:flex;flex-direction:column;gap:12px;}
+.howto-card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:16px;}
+.howto-head{font-size:15px;font-weight:600;color:var(--text);margin-bottom:10px;display:flex;align-items:center;gap:8px;}
+.howto-step{display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;}
+.howto-step:last-child{margin-bottom:0;}
+.step-num{width:22px;height:22px;border-radius:50%;background:var(--surface2);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:var(--muted);flex-shrink:0;margin-top:1px;}
+.step-text{font-size:13px;color:var(--text);line-height:1.6;font-family:var(--mono);}
+.step-sub{font-size:11px;color:var(--muted);margin-top:2px;}
+.howto-rule{background:var(--surface2);border-radius:10px;padding:10px 12px;font-size:12px;color:var(--muted);font-family:var(--mono);line-height:1.7;margin-top:4px;}
+.howto-rule b{color:var(--text);font-weight:500;}
+.badge-green{background:var(--green);color:#000;font-size:10px;font-weight:600;padding:2px 8px;border-radius:4px;font-family:var(--mono);}
+.badge-blue{background:var(--blue-dim);color:#93c5fd;font-size:10px;font-weight:600;padding:2px 8px;border-radius:4px;font-family:var(--mono);}
+.badge-amber{background:#451a03;color:#fb923c;font-size:10px;font-weight:600;padding:2px 8px;border-radius:4px;font-family:var(--mono);}
 </style>
 </head>
 <body>
@@ -767,6 +822,14 @@ body{min-height:100vh;padding-bottom:calc(env(safe-area-inset-bottom) + 16px);}
   </div>
   <button class="rbtn" id="rbtn" onclick="runPipeline()">Run ↗</button>
 </div>
+
+<div id="hedge-alert-wrap" style="display:none;margin-top:12px">
+  <div class="alert-banner">
+    <div class="alert-title">⚡ Hedge alert — action needed now</div>
+    <div id="hedge-alert-list"></div>
+  </div>
+</div>
+
 <div style="height:16px"></div>
 <div class="metrics">
   <div class="m"><div class="ml">Buys</div><div class="mv" id="m-buys">—</div><div class="ms">all time</div></div>
@@ -780,6 +843,7 @@ body{min-height:100vh;padding-bottom:calc(env(safe-area-inset-bottom) + 16px);}
   <button class="tab" onclick="showTab('chart',this)">P&L chart</button>
   <button class="tab" onclick="showTab('backtest',this)">Backtest ↗</button>
   <button class="tab" onclick="showTab('stats',this)">Ticker stats</button>
+  <button class="tab" onclick="showTab('howto',this)">How to use</button>
 </div>
 
 <div id="tab-today">
@@ -846,6 +910,53 @@ body{min-height:100vh;padding-bottom:calc(env(safe-area-inset-bottom) + 16px);}
   <div style="height:16px"></div>
 </div>
 
+<div id="tab-howto" style="display:none">
+  <div class="howto">
+
+    <div class="howto-card">
+      <div class="howto-head">Your daily routine</div>
+      <div class="howto-step"><div class="step-num">1</div><div class="step-text">Open the app each morning. If the green dot is lit and shows today's date — you're good, signals already ran at 9am.<div class="step-sub">If it says "Never run" — tap the green Run ↗ button and wait 60 seconds.</div></div></div>
+      <div class="howto-step"><div class="step-num">2</div><div class="step-text">Look at the Today tab. Ignore all gray cards. You only care about cards with a <span class="badge-green">BUY</span> badge.</div></div>
+      <div class="howto-step"><div class="step-num">3</div><div class="step-text">If a BUY fires on SOFI or DKNG — those are the only two worth acting on right now. Go place the trade in your broker.</div></div>
+      <div class="howto-step"><div class="step-num">4</div><div class="step-text">Come back every morning and check for the orange ⚡ hedge alert banner at the top. If it appears — act on it immediately.</div></div>
+      <div class="howto-step"><div class="step-num">5</div><div class="step-text">At day 10, go close the trade in your broker. Sell everything regardless of where it is.</div></div>
+    </div>
+
+    <div class="howto-card">
+      <div class="howto-head"><span class="badge-green" style="font-size:12px">CALL+HEDGE</span>&nbsp; Step by step</div>
+      <div class="howto-step"><div class="step-num">1</div><div class="step-text">Signal fires → go to your broker → search the ticker (e.g. SOFI)<div class="step-sub">Tap Options → Calls → pick expiration ~2 weeks out</div></div></div>
+      <div class="howto-step"><div class="step-num">2</div><div class="step-text">Pick a strike price at or just above today's stock price<div class="step-sub">Example: SOFI at $18.50 → buy the $19 call</div></div></div>
+      <div class="howto-step"><div class="step-num">3</div><div class="step-text">Buy 1 contract to start. Never more than 20% of your account on one trade.<div class="step-sub">The app shows "max X contracts" — stick to that number</div></div></div>
+      <div class="howto-step"><div class="step-num">4</div><div class="step-text">Watch for the ⚡ hedge alert. If your call is up 20%+ the app will show an orange banner.<div class="step-sub">When that fires → go buy 1 Put at the same expiration, same strike. This locks in your profit.</div></div></div>
+      <div class="howto-step"><div class="step-num">5</div><div class="step-text">At day 10 → sell everything. Close the call and the put if you bought one.<div class="step-sub">Don't wait longer. Take whatever profit or loss is there.</div></div></div>
+      <div class="howto-rule"><b>Why it works:</b> You buy a cheap ticket that pays big if the stock goes up. If it rockets, you buy insurance to protect the gain. If it goes nowhere, you only lose what you paid for the ticket — nothing more.</div>
+    </div>
+
+    <div class="howto-card">
+      <div class="howto-head"><span class="badge-blue" style="font-size:12px">STRADDLE</span>&nbsp; Step by step</div>
+      <div class="howto-rule" style="margin-bottom:10px">Only use this when earnings are 3–7 days away. The app only fires this signal near earnings.</div>
+      <div class="howto-step"><div class="step-num">1</div><div class="step-text">Signal fires → go to your broker → search the ticker<div class="step-sub">Tap Options → pick expiration ~1 week out</div></div></div>
+      <div class="howto-step"><div class="step-num">2</div><div class="step-text">Buy 1 Call AND 1 Put — both at the same strike price (current stock price)<div class="step-sub">Yes, you're buying both at the same time. That's the straddle.</div></div></div>
+      <div class="howto-step"><div class="step-num">3</div><div class="step-text">Don't touch it. Let earnings happen. The stock will move big.<div class="step-sub">No hedge needed — the put is already built in.</div></div></div>
+      <div class="howto-step"><div class="step-num">4</div><div class="step-text">At day 5 → sell both the call and the put.<div class="step-sub">One will be worth a lot. The other nearly worthless. Sell both anyway.</div></div></div>
+      <div class="howto-rule"><b>Why it works:</b> Earnings cause big moves — up OR down. You win either way as long as the stock moves more than ~8%. If the stock barely reacts to earnings, you lose the premium on both options.</div>
+    </div>
+
+    <div class="howto-card">
+      <div class="howto-head">Golden rules</div>
+      <div class="howto-rule">
+        <b>Never risk more than 20%</b> of your account on one trade — the app calculates this for you.<br>
+        <b>Only trade green tickers</b> — check the Ticker stats tab. Only SOFI and DKNG are green right now.<br>
+        <b>Always close at day 10</b> — don't hold longer hoping it recovers. Take the result and move on.<br>
+        <b>The app never touches your money</b> — it only tells you when. You place the trade yourself in your broker.<br>
+        <b>-100% means the option expired worthless</b> — you lost the premium, not your whole account. Premium = 5% of stock price per share.
+      </div>
+    </div>
+
+  </div>
+  <div style="height:20px"></div>
+</div>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script>
 let liveChart=null, btChart=null;
@@ -853,7 +964,7 @@ const today=new Date().toISOString().slice(0,10);
 document.getElementById('dpick').value=today;
 
 function showTab(n,btn){
-  ['today','open','closed','chart','backtest','stats'].forEach(t=>
+  ['today','open','closed','chart','backtest','stats','howto'].forEach(t=>
     document.getElementById('tab-'+t).style.display=t===n?'':'none');
   document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));
   btn.classList.add('active');
@@ -1075,16 +1186,33 @@ async function loadTickerStats(){
   }).join('');
 }
 
+async function loadHedgeAlerts(){
+  try{
+    const alerts=await(await fetch('/api/hedge-alerts')).json();
+    const wrap=document.getElementById('hedge-alert-wrap');
+    const list=document.getElementById('hedge-alert-list');
+    if(!alerts.length){wrap.style.display='none';return;}
+    wrap.style.display='';
+    list.innerHTML=alerts.map(a=>`
+      <div class="alert-item">
+        <strong>${a.ticker}</strong> — call up ${a.gain_pct.toFixed(0)}%
+        &nbsp;·&nbsp; $${a.entry_price.toFixed(2)} → $${a.current_price.toFixed(2)}
+        <br><span style="color:#fdba74">→ Buy a PUT now at the same strike + expiration to lock in profit</span>
+      </div>`).join('');
+  }catch(e){}
+}
+
 async function loadAll(){
   await loadStatus();
   await loadSignals(document.getElementById('dpick').value);
   await loadTrades();
+  await loadHedgeAlerts();
   try{const r=await fetch('/api/backtest/results');if(r.ok) loadBTResults();}catch(e){}
   loadTickerStats();
 }
 
 function showTab(n,btn){
-  ['today','open','closed','chart','backtest','stats'].forEach(t=>
+  ['today','open','closed','chart','backtest','stats','howto'].forEach(t=>
     document.getElementById('tab-'+t).style.display=t===n?'':'none');
   document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));
   btn.classList.add('active');
@@ -1094,6 +1222,7 @@ function showTab(n,btn){
 
 loadAll();
 setInterval(loadStatus,15000);
+setInterval(loadHedgeAlerts,60000);
 </script>
 </body>
 </html>"""
