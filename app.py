@@ -697,7 +697,121 @@ def api_ticker_stats():
     result.sort(key=lambda x: x["win_rate"], reverse=True)
     return jsonify(result)
 
-@app.route("/api/hedge-alerts")
+@app.route("/api/market-report")
+def api_market_report():
+    """Fetch S&P 500 and VIX data to give market context for today's signals."""
+    try:
+        # S&P 500
+        spy = yf.download("SPY", period="60d", auto_adjust=False, progress=False)
+        if isinstance(spy.columns, pd.MultiIndex):
+            spy.columns = spy.columns.get_level_values(0)
+        spy_close = _ensure_series(spy["Close"]).astype(float)
+        spy_price = float(spy_close.iloc[-1])
+        spy_ma20  = float(spy_close.rolling(20).mean().iloc[-1])
+        spy_ma50  = float(spy_close.rolling(50).mean().iloc[-1])
+        spy_1d    = round((spy_price - float(spy_close.iloc[-2])) / float(spy_close.iloc[-2]) * 100, 2)
+        spy_5d    = round((spy_price - float(spy_close.iloc[-6])) / float(spy_close.iloc[-6]) * 100, 2)
+        spy_above_ma20 = spy_price > spy_ma20
+        spy_above_ma50 = spy_price > spy_ma50
+        spy_rsi   = round(float(calc_rsi(spy_close).iloc[-1]), 1)
+
+        # VIX (fear index)
+        vix_df    = yf.download("^VIX", period="10d", auto_adjust=False, progress=False)
+        if isinstance(vix_df.columns, pd.MultiIndex):
+            vix_df.columns = vix_df.columns.get_level_values(0)
+        vix       = round(float(_ensure_series(vix_df["Close"]).iloc[-1]), 1)
+
+        # Market condition verdict
+        if not spy_above_ma20:
+            condition = "bearish"
+            condition_detail = "S&P below MA20 — market in downtrend. Consider skipping signals today."
+        elif vix > 30:
+            condition = "volatile"
+            condition_detail = f"VIX at {vix} — high fear. Options premiums are expensive. Trade smaller."
+        elif vix > 20:
+            condition = "caution"
+            condition_detail = f"VIX at {vix} — elevated volatility. Signals can work but size down."
+        elif spy_above_ma20 and spy_above_ma50 and spy_1d > 0:
+            condition = "bullish"
+            condition_detail = "Market trending up. Good conditions for call signals."
+        else:
+            condition = "neutral"
+            condition_detail = "Market conditions are mixed. Follow signals but keep size small."
+
+        return jsonify({
+            "spy_price":     round(spy_price, 2),
+            "spy_ma20":      round(spy_ma20, 2),
+            "spy_ma50":      round(spy_ma50, 2),
+            "spy_1d":        spy_1d,
+            "spy_5d":        spy_5d,
+            "spy_above_ma20": spy_above_ma20,
+            "spy_above_ma50": spy_above_ma50,
+            "spy_rsi":       spy_rsi,
+            "vix":           vix,
+            "condition":     condition,
+            "condition_detail": condition_detail,
+        })
+    except Exception as e:
+        log.warning(f"market_report: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/stock-summary/<ticker>")
+def api_stock_summary(ticker):
+    """Full summary for a single ticker — stats, last 5 trades, confidence score."""
+    try:
+        # Pull historical stats
+        live_trades = load_json(TRADES_FILE, [])
+        bt_data     = load_json(BACKTEST_FILE, None)
+        bt_trades   = bt_data.get("trades", []) if bt_data else []
+        all_closed  = [t for t in live_trades + bt_trades
+                       if t.get("status") == "closed" and t.get("ticker") == ticker]
+        all_closed.sort(key=lambda t: t.get("exit_date",""))
+
+        n       = len(all_closed)
+        returns = [t.get("return_pct", 0) for t in all_closed]
+        wins    = [r for r in returns if r > 0]
+        win_rate = round(len(wins)/n*100, 1) if n else 0
+        avg_ret  = round(sum(returns)/n, 1) if n else 0
+        last5    = all_closed[-5:] if n >= 5 else all_closed
+
+        # Today's signal details
+        today_str = str(date.today())
+        signals   = load_json(SIGNALS_FILE, [])
+        today_sig = next((s for s in signals
+                          if s.get("ticker")==ticker and s.get("date")==today_str), None)
+
+        # Confidence score 1-10
+        score = 5
+        if today_sig and today_sig.get("is_buy"):
+            if today_sig.get("pullback_pct", 0) >= 4:   score += 1
+            if today_sig.get("pullback_pct", 0) >= 6:   score += 1
+            rsi = today_sig.get("rsi", 50)
+            if 40 <= rsi <= 60:                          score += 1
+            if today_sig.get("vol_ratio", 1) >= 1.2:    score += 1
+            if win_rate >= 60:                           score += 1
+            score = min(score, 10)
+        elif today_sig and not today_sig.get("is_buy"):
+            score = 0
+
+        return jsonify({
+            "ticker":    ticker,
+            "n_trades":  n,
+            "win_rate":  win_rate,
+            "avg_ret":   avg_ret,
+            "best":      round(max(returns), 1) if returns else 0,
+            "worst":     round(min(returns), 1) if returns else 0,
+            "last5":     [{"exit_date": t.get("exit_date",""),
+                           "return_pct": t.get("return_pct",0),
+                           "entry_price": t.get("entry_price",0),
+                           "exit_price": t.get("exit_price",0)} for t in last5],
+            "today_signal": today_sig,
+            "confidence": score,
+        })
+    except Exception as e:
+        log.warning(f"stock_summary {ticker}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 def api_hedge_alerts():
     trades     = load_json(TRADES_FILE, [])
     open_calls = [t for t in trades
@@ -848,6 +962,13 @@ body{min-height:100vh;padding-bottom:calc(env(safe-area-inset-bottom) + 16px);}
 <div id="tab-today">
   <div class="drow"><span style="font-size:12px;color:var(--muted);font-family:var(--mono)">Date:</span>
     <input type="date" id="dpick" onchange="loadSignals(this.value)"></div>
+
+  <!-- Market Report -->
+  <div id="market-report" style="margin:0 20px 14px;background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:14px 16px;">
+    <div style="font-size:11px;color:var(--muted);font-family:var(--mono);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Market conditions</div>
+    <div id="market-body"><div style="font-size:12px;color:var(--muted);font-family:var(--mono)">Loading…</div></div>
+  </div>
+
   <div class="cards" id="siglist"><div class="empty">Hit "Run ↗" to generate signals.</div></div>
 </div>
 
@@ -1005,18 +1126,88 @@ async function loadStatus(){
   else{d.className='sdot didle';t.textContent='Never run';}
 }
 
+async function loadMarketReport(){
+  try{
+    const m=await(await fetch('/api/market-report')).json();
+    if(m.error){document.getElementById('market-body').innerHTML='<span style="color:var(--muted);font-size:12px;font-family:var(--mono)">Unable to load market data</span>';return;}
+    const col=m.condition==='bullish'?'#22c55e':m.condition==='bearish'?'#ef4444':m.condition==='volatile'?'#ef4444':'#f59e0b';
+    const spy1dCol=m.spy_1d>=0?'#22c55e':'#ef4444';
+    const spy5dCol=m.spy_5d>=0?'#22c55e':'#ef4444';
+    document.getElementById('market-body').innerHTML=`
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+        <span style="font-size:15px;font-weight:600;color:${col};font-family:var(--mono)">${m.condition.toUpperCase()}</span>
+        <span style="font-size:12px;color:var(--muted);font-family:var(--mono)">SPY $${m.spy_price} · 
+          <span style="color:${spy1dCol}">${m.spy_1d>=0?'+':''}${m.spy_1d}% today</span> · 
+          <span style="color:${spy5dCol}">${m.spy_5d>=0?'+':''}${m.spy_5d}% 5d</span> · 
+          VIX ${m.vix} · RSI ${m.spy_rsi}</span>
+      </div>
+      <div style="display:flex;gap:6px;margin-bottom:8px">
+        <span style="font-size:10px;font-family:var(--mono);padding:2px 8px;border-radius:4px;${m.spy_above_ma20?'background:#14532d;color:#86efac':'background:#450a0a;color:#fca5a5'}">MA20 ${m.spy_above_ma20?'✓':'✗'}</span>
+        <span style="font-size:10px;font-family:var(--mono);padding:2px 8px;border-radius:4px;${m.spy_above_ma50?'background:#14532d;color:#86efac':'background:#450a0a;color:#fca5a5'}">MA50 ${m.spy_above_ma50?'✓':'✗'}</span>
+        <span style="font-size:10px;font-family:var(--mono);padding:2px 8px;border-radius:4px;${m.vix<20?'background:#14532d;color:#86efac':m.vix>30?'background:#450a0a;color:#fca5a5':'background:#451a03;color:#fcd34d'}">VIX ${m.vix<20?'LOW':m.vix>30?'HIGH':'ELEVATED'}</span>
+      </div>
+      <div style="font-size:12px;color:var(--muted);font-family:var(--mono)">${m.condition_detail}</div>`;
+  }catch(e){document.getElementById('market-body').innerHTML='<span style="color:var(--muted);font-size:12px;font-family:var(--mono)">Market data unavailable</span>';}
+}
+
+async function loadStockSummary(ticker, cardEl){
+  try{
+    const s=await(await fetch('/api/stock-summary/'+ticker)).json();
+    if(s.error) return;
+    const last5html=s.last5.map(t=>{
+      const ret=t.return_pct||0;
+      const col=ret>0?'#22c55e':'#ef4444';
+      return `<span title="${t.exit_date} ${ret>=0?'+':''}${ret.toFixed(0)}%" style="cursor:default;font-size:16px">${ret>0?'✅':'❌'}</span>`;
+    }).join(' ');
+    const confCol=s.confidence>=7?'#22c55e':s.confidence>=4?'#f59e0b':'#ef4444';
+    const confBar=`<div style="display:inline-flex;gap:2px">${Array.from({length:10},(_,i)=>`<div style="width:8px;height:8px;border-radius:2px;background:${i<s.confidence?confCol:'var(--border)'}"></div>`).join('')}</div>`;
+    const summaryHtml=`
+      <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--border)">
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px">
+          <div style="background:var(--surface2);border-radius:8px;padding:8px 10px">
+            <div style="font-size:10px;color:var(--muted);font-family:var(--mono);text-transform:uppercase">Win rate</div>
+            <div style="font-size:18px;font-weight:600;color:${s.win_rate>=50?'#22c55e':s.win_rate>=35?'#f59e0b':'#ef4444'}">${s.win_rate}%</div>
+            <div style="font-size:10px;color:var(--muted);font-family:var(--mono)">${s.n_trades} trades</div>
+          </div>
+          <div style="background:var(--surface2);border-radius:8px;padding:8px 10px">
+            <div style="font-size:10px;color:var(--muted);font-family:var(--mono);text-transform:uppercase">Avg return</div>
+            <div style="font-size:18px;font-weight:600;color:${s.avg_ret>=0?'#22c55e':'#ef4444'}">${s.avg_ret>=0?'+':''}${s.avg_ret}%</div>
+            <div style="font-size:10px;color:var(--muted);font-family:var(--mono)">per trade</div>
+          </div>
+          <div style="background:var(--surface2);border-radius:8px;padding:8px 10px">
+            <div style="font-size:10px;color:var(--muted);font-family:var(--mono);text-transform:uppercase">Confidence</div>
+            <div style="font-size:18px;font-weight:600;color:${confCol}">${s.confidence}/10</div>
+            <div style="font-size:10px;color:var(--muted);font-family:var(--mono)">today</div>
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--muted);font-family:var(--mono);margin-bottom:6px">Last ${s.last5.length} trades:</div>
+        <div style="margin-bottom:8px">${last5html}</div>
+        <div style="margin-bottom:6px">${confBar}</div>
+        <div style="font-size:10px;color:var(--muted);font-family:var(--mono)">Best +${s.best}% · Worst ${s.worst}%</div>
+      </div>`;
+    const body=cardEl.querySelector('.cbody');
+    const existing=body.querySelector('.summary-expand');
+    if(existing){existing.remove();return;}
+    const div=document.createElement('div');
+    div.className='summary-expand';
+    div.innerHTML=summaryHtml;
+    body.appendChild(div);
+  }catch(e){}
+}
+
 async function loadSignals(ds){
   const sigs=await(await fetch('/api/signals?date='+ds)).json();
   const el=document.getElementById('siglist');
   if(!sigs.length){el.innerHTML='<div class="empty">No signals for '+ds+'. Hit Run ↗.</div>';return;}
   el.innerHTML=sigs.map(s=>`
-    <div class="card ${s.is_buy?'bc':''}">
+    <div class="card ${s.is_buy?'bc':''}" onclick="loadStockSummary('${s.ticker}',this)" style="cursor:pointer">
       <div class="cdot ${s.is_buy?'bdot':'ndot'}"></div>
       <div class="cbody">
         <div class="ctop">
           <span class="cticker">${s.ticker}</span>
           <span class="tag ${s.strategy==='STRADDLE'?'ts':'tc'}">${s.strategy}</span>
           ${s.is_buy?'<span class="tag tbuy">BUY</span>':''}
+          ${s.is_buy?`<span style="font-size:10px;color:var(--muted);font-family:var(--mono);margin-left:auto">tap for details</span>`:''}
         </div>
         <div class="cdet">${s.detail||''}</div>
         ${s.price?`<div class="cprice">$${parseFloat(s.price).toFixed(2)}${s.max_contracts!=null?' · max '+s.max_contracts+' contract'+(s.max_contracts!==1?'s':''):''}</div>`:''}
@@ -1234,6 +1425,7 @@ async function loadAll(){
   await loadSignals(document.getElementById('dpick').value);
   await loadTrades();
   await loadHedgeAlerts();
+  await loadMarketReport();
   try{const r=await fetch('/api/backtest/results');if(r.ok) loadBTResults();}catch(e){}
   loadTickerStats();
 }
@@ -1245,11 +1437,13 @@ function showTab(n,btn){
   btn.classList.add('active');
   if(n==='chart') drawLiveChart();
   if(n==='stats') loadTickerStats();
+  if(n==='today') loadMarketReport();
 }
 
 loadAll();
 setInterval(loadStatus,15000);
 setInterval(loadHedgeAlerts,60000);
+setInterval(loadMarketReport,300000);
 </script>
 </body>
 </html>"""
