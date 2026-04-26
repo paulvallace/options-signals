@@ -137,27 +137,39 @@ def trading_days_in_range(start_date, end_date):
 HISTORICAL_EARNINGS = {
     # Active straddle tickers — 50%+ win rate
     "RIOT": [
-        date(2024, 5,  8), date(2024, 8,  7), date(2024, 11, 6),  date(2025, 2, 24),
+        date(2022, 5, 16), date(2022, 8, 15), date(2022, 11, 14), date(2023, 2, 27),
+        date(2023, 5, 15), date(2023, 8, 14), date(2023, 11, 13), date(2024, 2, 26),
+        date(2024, 5,  8), date(2024, 8,  7), date(2024, 11,  6), date(2025, 2, 24),
         date(2025, 5,  7), date(2025, 8,  6), date(2025, 10, 29), date(2026, 3,  2),
     ],
     "UPST": [
+        date(2022, 2, 15), date(2022, 5,  9), date(2022, 8,  8), date(2022, 11,  8),
+        date(2023, 2, 14), date(2023, 5,  9), date(2023, 8,  8), date(2023, 11,  7),
         date(2024, 5,  7), date(2024, 8,  6), date(2024, 11,  7), date(2025, 2, 11),
         date(2025, 5,  6), date(2025, 8,  5), date(2025, 11,  4), date(2026, 2, 10),
     ],
     "COIN": [
+        date(2022, 5, 10), date(2022, 8,  9), date(2022, 11,  3), date(2023, 2, 21),
+        date(2023, 5,  4), date(2023, 8,  3), date(2023, 11,  2), date(2024, 2, 15),
         date(2024, 5,  2), date(2024, 8,  1), date(2024, 10, 30), date(2025, 2, 13),
         date(2025, 5,  8), date(2025, 8,  7), date(2025, 11,  6), date(2026, 2, 12),
     ],
     "MARA": [
+        date(2022, 5,  4), date(2022, 8,  8), date(2022, 11,  8), date(2023, 2, 28),
+        date(2023, 5,  9), date(2023, 8,  8), date(2023, 11,  8), date(2024, 2, 28),
         date(2024, 5,  8), date(2024, 8,  7), date(2024, 11,  5), date(2025, 2, 25),
         date(2025, 5,  8), date(2025, 7, 29), date(2025, 11,  4), date(2026, 3,  4),
     ],
-    # Call+hedge tickers — kept for reference (not used for straddles)
+    # Call+hedge tickers — kept for straddle reference
     "HOOD": [
+        date(2022, 5, 26), date(2022, 8,  2), date(2022, 11,  2), date(2023, 2,  8),
+        date(2023, 5, 10), date(2023, 8,  2), date(2023, 11,  1), date(2024, 2, 13),
         date(2024, 5,  8), date(2024, 8,  7), date(2024, 10, 30), date(2025, 2, 12),
         date(2025, 4, 30), date(2025, 8,  6), date(2025, 11,  5), date(2026, 2, 10),
     ],
     "SOFI": [
+        date(2022, 5,  9), date(2022, 8,  1), date(2022, 10, 31), date(2023, 1, 30),
+        date(2023, 4, 24), date(2023, 7, 31), date(2023, 10, 30), date(2024, 1, 29),
         date(2024, 4, 29), date(2024, 7, 30), date(2024, 10, 29), date(2025, 1, 27),
         date(2025, 4, 28), date(2025, 7, 29), date(2025, 10, 28), date(2026, 1, 30),
     ],
@@ -473,7 +485,8 @@ def run_backtest_engine(months=12):
     backtest_status["progress"] = f"Downloading price data for {months}-month backtest…"
 
     # Fetch enough history for MA calculations (need 60+ days before start)
-    fetch_start = (start_date - timedelta(days=120)).strftime("%Y-%m-%d")
+    # Use 180 days buffer to handle 50-day MA warmup on long backtests
+    fetch_start = (start_date - timedelta(days=180)).strftime("%Y-%m-%d")
     price_cache = {}
     all_tickers = list(set(TICKERS + STRADDLE_TICKERS))
     for i, ticker in enumerate(all_tickers):
@@ -1070,6 +1083,8 @@ body{min-height:100vh;padding-bottom:calc(env(safe-area-inset-bottom) + 16px);}
       <option value="3">Last 3 months</option>
       <option value="6">Last 6 months</option>
       <option value="12" selected>Last 12 months</option>
+      <option value="24">Last 24 months</option>
+      <option value="36">Last 36 months</option>
     </select>
     <button class="btbtn" id="btbtn" onclick="runBacktest()">Run backtest ↗</button>
   </div>
@@ -1310,7 +1325,11 @@ async function loadSignals(ds){
   const sigs=await(await fetch('/api/signals?date='+ds)).json();
   const el=document.getElementById('siglist');
   if(!sigs.length){el.innerHTML='<div class="empty">No signals for '+ds+'. Hit Run ↗.</div>';return;}
-  el.innerHTML=sigs.map(s=>{
+
+  const calls     = sigs.filter(s=>s.strategy==='CALL+HEDGE');
+  const straddles = sigs.filter(s=>s.strategy==='STRADDLE');
+
+  function renderCard(s){
     const isBuy=s.is_buy;
     const isStraddle=s.strategy==='STRADDLE';
     let actionHtml='';
@@ -1335,8 +1354,7 @@ async function loadSignals(ds){
         </div>
       </div>`;
     }
-    return `
-    <div class="card ${isBuy?'bc':''}" onclick="loadStockSummary('${s.ticker}','${s.strategy}',this)" style="cursor:pointer">
+    return `<div class="card ${isBuy?'bc':''}" onclick="loadStockSummary('${s.ticker}','${s.strategy}',this)" style="cursor:pointer">
       <div class="cdot ${isBuy?'bdot':'ndot'}"></div>
       <div class="cbody">
         <div class="ctop">
@@ -1350,7 +1368,20 @@ async function loadSignals(ds){
         ${actionHtml}
       </div>
     </div>`;
-  }).join('');
+  }
+
+  const sectionHead=(label,sub)=>`
+    <div style="padding:4px 0 8px;display:flex;align-items:baseline;gap:8px">
+      <span style="font-size:12px;font-weight:600;color:var(--text);font-family:var(--mono);text-transform:uppercase;letter-spacing:.05em">${label}</span>
+      <span style="font-size:11px;color:var(--muted);font-family:var(--mono)">${sub}</span>
+    </div>`;
+
+  el.innerHTML=`
+    ${calls.length ? sectionHead('📈 Call + Hedge','buy on dip · hold 10 days · hedge at +20%') : ''}
+    ${calls.map(renderCard).join('')}
+    ${straddles.length ? '<div style="height:14px"></div>'+sectionHead('🔀 Straddle','buy call+put before earnings · hold 5 days') : ''}
+    ${straddles.map(renderCard).join('')}
+  `;
 }
 
 function tradingDaysElapsed(entryDateStr) {
