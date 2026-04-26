@@ -28,7 +28,9 @@ BACKTEST_FILE  = DATA_DIR / "backtest.json"
 
 TICKERS          = ["RIOT", "HOOD", "SOFI", "UPST",                         # green — proven 50%+
                     "DKNG", "NIO", "CHWY", "PLTR", "SNAP", "ROKU", "MARA"]  # testing call+hedge
-STRADDLE_TICKERS = ["UPST", "MARA", "COIN", "RIOT"]                         # straddle — 50%+ win rate only
+STRADDLE_TICKERS = ["UPST", "MARA", "COIN", "RIOT",                         # proven 50%+ straddle
+                    "HOOD", "SOFI", "AFRM", "DKNG", "SNAP", "PLTR",         # testing straddle
+                    "TSLA", "NVDA"]                                           # testing — may be priced in
 ACCOUNT_SIZE  = 2_000
 RISK_PCT      = 0.03   # 3% risk per trade (realistic — between 1-5%)
 MA_WINDOWS     = [20, 50]
@@ -135,7 +137,6 @@ def trading_days_in_range(start_date, end_date):
 # yfinance only returns FUTURE earnings dates, not historical ones.
 # Format: "TICKER": [date, date, ...] — actual report dates
 HISTORICAL_EARNINGS = {
-    # Active straddle tickers — 50%+ win rate
     "RIOT": [
         date(2022, 5, 16), date(2022, 8, 15), date(2022, 11, 14), date(2023, 2, 27),
         date(2023, 5, 15), date(2023, 8, 14), date(2023, 11, 13), date(2024, 2, 26),
@@ -160,7 +161,6 @@ HISTORICAL_EARNINGS = {
         date(2024, 5,  8), date(2024, 8,  7), date(2024, 11,  5), date(2025, 2, 25),
         date(2025, 5,  8), date(2025, 7, 29), date(2025, 11,  4), date(2026, 3,  4),
     ],
-    # Call+hedge tickers — kept for straddle reference
     "HOOD": [
         date(2022, 5, 26), date(2022, 8,  2), date(2022, 11,  2), date(2023, 2,  8),
         date(2023, 5, 10), date(2023, 8,  2), date(2023, 11,  1), date(2024, 2, 13),
@@ -172,6 +172,42 @@ HISTORICAL_EARNINGS = {
         date(2023, 4, 24), date(2023, 7, 31), date(2023, 10, 30), date(2024, 1, 29),
         date(2024, 4, 29), date(2024, 7, 30), date(2024, 10, 29), date(2025, 1, 27),
         date(2025, 4, 28), date(2025, 7, 29), date(2025, 10, 28), date(2026, 1, 30),
+    ],
+    "AFRM": [
+        date(2022, 5, 12), date(2022, 8, 25), date(2022, 11,  3), date(2023, 2,  9),
+        date(2023, 5, 11), date(2023, 8, 24), date(2023, 11,  9), date(2024, 2,  8),
+        date(2024, 5,  9), date(2024, 8,  8), date(2024, 11,  7), date(2025, 2,  6),
+        date(2025, 5, 14), date(2025, 8,  7), date(2025, 11,  6), date(2026, 2,  5),
+    ],
+    "DKNG": [
+        date(2022, 5,  6), date(2022, 8,  5), date(2022, 11,  4), date(2023, 2, 24),
+        date(2023, 5,  5), date(2023, 8,  4), date(2023, 11,  3), date(2024, 2, 15),
+        date(2024, 5,  2), date(2024, 8,  1), date(2024, 11,  7), date(2025, 2, 14),
+        date(2025, 5,  1), date(2025, 8,  1), date(2025, 11,  7), date(2026, 2, 13),
+    ],
+    "SNAP": [
+        date(2022, 4, 21), date(2022, 7, 21), date(2022, 10, 20), date(2023, 1, 31),
+        date(2023, 4, 27), date(2023, 7, 25), date(2023, 10, 24), date(2024, 1, 30),
+        date(2024, 4, 25), date(2024, 7, 23), date(2024, 10, 29), date(2025, 2,  4),
+        date(2025, 4, 24), date(2025, 7, 29), date(2025, 11,  5), date(2026, 2,  4),
+    ],
+    "PLTR": [
+        date(2022, 5,  9), date(2022, 8,  8), date(2022, 11,  7), date(2023, 2, 13),
+        date(2023, 5,  8), date(2023, 8,  7), date(2023, 11,  3), date(2024, 2,  5),
+        date(2024, 5,  6), date(2024, 8,  5), date(2024, 11,  4), date(2025, 2,  3),
+        date(2025, 5,  5), date(2025, 8,  4), date(2025, 11,  3), date(2026, 2,  3),
+    ],
+    "TSLA": [
+        date(2022, 4, 20), date(2022, 7, 20), date(2022, 10, 19), date(2023, 1, 25),
+        date(2023, 4, 19), date(2023, 7, 19), date(2023, 10, 18), date(2024, 1, 24),
+        date(2024, 4, 23), date(2024, 7, 23), date(2024, 10, 23), date(2025, 1, 29),
+        date(2025, 4, 22), date(2025, 7, 22), date(2025, 10, 22), date(2026, 4, 22),
+    ],
+    "NVDA": [
+        date(2022, 5, 25), date(2022, 8, 24), date(2022, 11, 16), date(2023, 2, 22),
+        date(2023, 5, 24), date(2023, 8, 23), date(2023, 11, 21), date(2024, 2, 21),
+        date(2024, 5, 22), date(2024, 8, 28), date(2024, 11, 20), date(2025, 2, 26),
+        date(2025, 5, 28), date(2025, 8, 27), date(2025, 11, 19), date(2026, 2, 26),
     ],
 }
 
