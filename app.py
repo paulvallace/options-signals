@@ -128,6 +128,66 @@ def trading_days_in_range(start_date, end_date):
         cur += timedelta(days=1)
     return days
 
+# ── HISTORICAL EARNINGS DATES ─────────────────────────────────────────────────
+# Hardcoded so the backtest can correctly simulate straddle entries.
+# yfinance only returns FUTURE earnings dates, not historical ones.
+# Format: "TICKER": [date, date, ...] — actual report dates
+HISTORICAL_EARNINGS = {
+    "RIOT": [
+        date(2024, 5,  8),   # Q1 2024
+        date(2024, 8,  7),   # Q2 2024
+        date(2024, 11, 6),   # Q3 2024
+        date(2025, 2, 24),   # Q4 2024
+        date(2025, 5,  7),   # Q1 2025
+        date(2025, 8,  6),   # Q2 2025
+        date(2025, 10, 29),  # Q3 2025
+        date(2026, 3,  2),   # Q4 2025
+    ],
+    "HOOD": [
+        date(2024, 5,  8),   # Q1 2024
+        date(2024, 8,  7),   # Q2 2024
+        date(2024, 10, 30),  # Q3 2024
+        date(2025, 2, 12),   # Q4 2024
+        date(2025, 4, 30),   # Q1 2025
+        date(2025, 8,  6),   # Q2 2025
+        date(2025, 11, 5),   # Q3 2025
+        date(2026, 2, 10),   # Q4 2025
+    ],
+    "SOFI": [
+        date(2024, 4, 29),   # Q1 2024
+        date(2024, 7, 30),   # Q2 2024
+        date(2024, 10, 29),  # Q3 2024
+        date(2025, 1, 27),   # Q4 2024
+        date(2025, 4, 28),   # Q1 2025
+        date(2025, 7, 29),   # Q2 2025
+        date(2025, 10, 28),  # Q3 2025
+        date(2026, 1, 30),   # Q4 2025
+    ],
+    "UPST": [
+        date(2024, 5,  7),   # Q1 2024
+        date(2024, 8,  6),   # Q2 2024
+        date(2024, 11, 7),   # Q3 2024
+        date(2025, 2, 11),   # Q4 2024
+        date(2025, 5,  6),   # Q1 2025
+        date(2025, 8,  5),   # Q2 2025
+        date(2025, 11, 4),   # Q3 2025
+        date(2026, 2, 10),   # Q4 2025
+    ],
+}
+
+def get_next_earnings_for_date(ticker, as_of_date):
+    """
+    Return the next earnings date for a ticker as of a given historical date.
+    Uses hardcoded historical dates so the backtest works correctly.
+    Falls back to live yfinance data for future/unknown dates.
+    """
+    dates = HISTORICAL_EARNINGS.get(ticker, [])
+    future = [d for d in dates if d > as_of_date]
+    if future:
+        return min(future)
+    # Fall back to live data for dates beyond our hardcoded history
+    return get_next_earnings(ticker)
+
 def calc_rsi(close, period=14):
     """Wilder RSI on a price series."""
     delta = close.diff()
@@ -297,9 +357,12 @@ def straddle_signal(ticker, df=None, as_of_date=None, next_earnings=None):
                     "detail": f"RSI {rsi:.0f} extreme — wait for calm before earnings",
                     "account": "big"}
 
-        # Earnings filter
+        # Earnings filter — use historical dates in backtest, live data for today
         if next_earnings is None:
-            next_earnings = get_next_earnings(ticker)
+            if as_of_date is not None:
+                next_earnings = get_next_earnings_for_date(ticker, as_of_date)
+            else:
+                next_earnings = get_next_earnings(ticker)
         if next_earnings is None:
             return {"ticker": ticker, "strategy": "STRADDLE", "is_buy": False,
                     "price": round(price, 2), "detail": "No upcoming earnings date"}
@@ -426,8 +489,6 @@ def run_backtest_engine(months=12):
         if df is not None:
             price_cache[ticker] = add_ma(df, MA_WINDOWS)
 
-    earnings_cache = {t: get_next_earnings(t) for t in TICKERS}
-
     trades = []
     for day_i, sim_date in enumerate(days):
         backtest_status["progress"] = f"Simulating {sim_date} ({day_i+1}/{len(days)})…"
@@ -441,9 +502,9 @@ def run_backtest_engine(months=12):
                 sig["date"] = str(sim_date)
                 day_buys.append(sig)
                 seen_today.add(ticker)
+            # Straddle — pass as_of_date so it uses historical earnings lookup
             strad = straddle_signal(ticker, df=price_cache[ticker],
-                                    as_of_date=sim_date,
-                                    next_earnings=earnings_cache.get(ticker))
+                                    as_of_date=sim_date)
             if strad and strad.get("is_buy"):
                 strad["date"] = str(sim_date)
                 day_buys.append(strad)
