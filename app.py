@@ -31,7 +31,7 @@ BIG_TICKERS   = ["RIOT", "HOOD", "SOFI", "UPST"]   # same for big account
 
 SMALL_ACCOUNT  = 2_000
 BIG_ACCOUNT    = 20_000
-RISK_PCT       = 0.20
+RISK_PCT       = 0.03   # 3% risk per trade (realistic — between 1-5%)
 MA_WINDOWS     = [20, 50]
 HOLD_DAYS      = 10
 CALL_COST_PCT  = 0.05
@@ -634,6 +634,14 @@ def api_run():
     threading.Thread(target=run_pipeline,daemon=True).start()
     return jsonify({"ok":True})
 
+@app.route("/api/trades/clear",methods=["POST"])
+def api_clear_trades():
+    trades  = load_json(TRADES_FILE,[])
+    closed  = [t for t in trades if t.get("status")!="open"]
+    cleared = len(trades) - len(closed)
+    save_json(TRADES_FILE, closed)
+    return jsonify({"ok":True,"cleared":cleared})
+
 @app.route("/api/status")
 def api_status(): return jsonify(pipeline_status)
 
@@ -879,6 +887,10 @@ body{min-height:100vh;padding-bottom:calc(env(safe-area-inset-bottom) + 16px);}
 </div>
 
 <div id="tab-open" style="display:none">
+  <div style="padding:0 20px 10px;display:flex;align-items:center;justify-content:space-between;">
+    <span style="font-size:12px;color:var(--muted);font-family:var(--mono)">Simulated positions only — not connected to your broker</span>
+    <button onclick="clearTrades()" style="background:transparent;border:1px solid var(--border);border-radius:8px;color:var(--muted);font-family:var(--mono);font-size:11px;padding:4px 10px;cursor:pointer;">Clear all ✕</button>
+  </div>
   <div class="cards" id="openlist"><div class="empty">No open trades.</div></div>
 </div>
 
@@ -909,11 +921,11 @@ body{min-height:100vh;padding-bottom:calc(env(safe-area-inset-bottom) + 16px);}
     <div class="btm"><div class="btml">Total trades</div><div class="btmv" id="bt-tot">—</div></div>
     <div class="btm"><div class="btml">Win rate</div><div class="btmv" id="bt-wr">—</div></div>
     <div class="btm"><div class="btml">Avg return</div><div class="btmv" id="bt-avg">—</div></div>
-    <div class="btm"><div class="btml">$2k → end balance</div><div class="btmv" id="bt-bal" style="font-size:16px">—</div></div>
+    <div class="btm"><div class="btml">$2k · 3% risk/trade</div><div class="btmv" id="bt-bal" style="font-size:16px">—</div></div>
   </div>
   <div class="cwrap" id="btcwrap" style="display:none">
     <div class="cbox">
-      <div style="font-size:12px;color:var(--muted);font-family:var(--mono);margin-bottom:12px">Simulated $2,000 account balance · 20% risk per trade</div>
+      <div style="font-size:12px;color:var(--muted);font-family:var(--mono);margin-bottom:12px">Simulated $2,000 account · 3% risk per trade</div>
       <div class="carea"><canvas id="btChart" role="img" aria-label="Backtest P&L">No data.</canvas></div>
     </div>
   </div>
@@ -952,7 +964,7 @@ body{min-height:100vh;padding-bottom:calc(env(safe-area-inset-bottom) + 16px);}
       <div class="howto-head"><span class="badge-green" style="font-size:12px">CALL+HEDGE</span>&nbsp; Step by step</div>
       <div class="howto-step"><div class="step-num">1</div><div class="step-text">Signal fires → go to your broker → search the ticker (e.g. SOFI)<div class="step-sub">Tap Options → Calls → pick expiration ~2 weeks out</div></div></div>
       <div class="howto-step"><div class="step-num">2</div><div class="step-text">Pick a strike price at or just above today's stock price<div class="step-sub">Example: SOFI at $18.50 → buy the $19 call</div></div></div>
-      <div class="howto-step"><div class="step-num">3</div><div class="step-text">Buy 1 contract to start. Never more than 20% of your account on one trade.<div class="step-sub">The app shows "max X contracts" — stick to that number</div></div></div>
+      <div class="howto-step"><div class="step-num">3</div><div class="step-text">Buy 1 contract to start. Risk 1–5% of your account per trade maximum.<div class="step-sub">Example: $2,000 account → risk $60–$100 per trade maximum</div></div></div>
       <div class="howto-step"><div class="step-num">4</div><div class="step-text">Watch for the ⚡ hedge alert. If your call is up 20%+ the app will show an orange banner.<div class="step-sub">When that fires → go buy 1 Put at the same expiration, same strike. This locks in your profit.</div></div></div>
       <div class="howto-step"><div class="step-num">5</div><div class="step-text">At day 10 → sell everything. Close the call and the put if you bought one.<div class="step-sub">Don't wait longer. Take whatever profit or loss is there.</div></div></div>
       <div class="howto-rule"><b>Why it works:</b> You buy a cheap ticket that pays big if the stock goes up. If it rockets, you buy insurance to protect the gain. If it goes nowhere, you only lose what you paid for the ticket — nothing more.</div>
@@ -971,7 +983,7 @@ body{min-height:100vh;padding-bottom:calc(env(safe-area-inset-bottom) + 16px);}
     <div class="howto-card">
       <div class="howto-head">Golden rules</div>
       <div class="howto-rule">
-        <b>Never risk more than 20%</b> of your account on one trade — the app calculates this for you.<br>
+        <b>Never risk more than 1–5%</b> of your account on one trade. $2,000 account = $60–$100 max per trade.<br>
         <b>Only trade green tickers</b> — check the Ticker stats tab. Only SOFI and DKNG are green right now.<br>
         <b>Always close at day 10</b> — don't hold longer hoping it recovers. Take the result and move on.<br>
         <b>The app never touches your money</b> — it only tells you when. You place the trade yourself in your broker.<br>
@@ -1229,6 +1241,13 @@ async function loadTickerStats(){
       <div style="font-size:10px;font-family:var(--mono);font-weight:500;padding:2px 8px;border-radius:4px;flex-shrink:0;${bgTag}">${s.verdict}</div>
     </div>`;
   }).join('');
+}
+
+async function clearTrades(){
+  if(!confirm('Clear all open trades? This cannot be undone.')) return;
+  await fetch('/api/trades/clear',{method:'POST'});
+  await loadTrades();
+  await loadStatus();
 }
 
 async function loadHedgeAlerts(){
