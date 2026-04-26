@@ -26,7 +26,9 @@ SIGNALS_FILE   = DATA_DIR / "signals.json"
 TRADES_FILE    = DATA_DIR / "trades.json"
 BACKTEST_FILE  = DATA_DIR / "backtest.json"
 
-TICKERS       = ["RIOT", "HOOD", "SOFI", "UPST"]   # green tickers — 50%+ win rate
+TICKERS         = ["RIOT", "HOOD", "SOFI", "UPST"]   # call+hedge — proven 50%+ win rate
+STRADDLE_TICKERS = ["RIOT", "HOOD", "SOFI", "UPST",  # test straddles on all of these
+                    "TSLA", "NVDA", "COIN", "MARA", "AFRM"]
 ACCOUNT_SIZE  = 2_000
 RISK_PCT      = 0.03   # 3% risk per trade (realistic — between 1-5%)
 MA_WINDOWS     = [20, 50]
@@ -134,44 +136,40 @@ def trading_days_in_range(start_date, end_date):
 # Format: "TICKER": [date, date, ...] — actual report dates
 HISTORICAL_EARNINGS = {
     "RIOT": [
-        date(2024, 5,  8),   # Q1 2024
-        date(2024, 8,  7),   # Q2 2024
-        date(2024, 11, 6),   # Q3 2024
-        date(2025, 2, 24),   # Q4 2024
-        date(2025, 5,  7),   # Q1 2025
-        date(2025, 8,  6),   # Q2 2025
-        date(2025, 10, 29),  # Q3 2025
-        date(2026, 3,  2),   # Q4 2025
+        date(2024, 5,  8), date(2024, 8,  7), date(2024, 11, 6), date(2025, 2, 24),
+        date(2025, 5,  7), date(2025, 8,  6), date(2025, 10, 29), date(2026, 3, 2),
     ],
     "HOOD": [
-        date(2024, 5,  8),   # Q1 2024
-        date(2024, 8,  7),   # Q2 2024
-        date(2024, 10, 30),  # Q3 2024
-        date(2025, 2, 12),   # Q4 2024
-        date(2025, 4, 30),   # Q1 2025
-        date(2025, 8,  6),   # Q2 2025
-        date(2025, 11, 5),   # Q3 2025
-        date(2026, 2, 10),   # Q4 2025
+        date(2024, 5,  8), date(2024, 8,  7), date(2024, 10, 30), date(2025, 2, 12),
+        date(2025, 4, 30), date(2025, 8,  6), date(2025, 11,  5), date(2026, 2, 10),
     ],
     "SOFI": [
-        date(2024, 4, 29),   # Q1 2024
-        date(2024, 7, 30),   # Q2 2024
-        date(2024, 10, 29),  # Q3 2024
-        date(2025, 1, 27),   # Q4 2024
-        date(2025, 4, 28),   # Q1 2025
-        date(2025, 7, 29),   # Q2 2025
-        date(2025, 10, 28),  # Q3 2025
-        date(2026, 1, 30),   # Q4 2025
+        date(2024, 4, 29), date(2024, 7, 30), date(2024, 10, 29), date(2025, 1, 27),
+        date(2025, 4, 28), date(2025, 7, 29), date(2025, 10, 28), date(2026, 1, 30),
     ],
     "UPST": [
-        date(2024, 5,  7),   # Q1 2024
-        date(2024, 8,  6),   # Q2 2024
-        date(2024, 11, 7),   # Q3 2024
-        date(2025, 2, 11),   # Q4 2024
-        date(2025, 5,  6),   # Q1 2025
-        date(2025, 8,  5),   # Q2 2025
-        date(2025, 11, 4),   # Q3 2025
-        date(2026, 2, 10),   # Q4 2025
+        date(2024, 5,  7), date(2024, 8,  6), date(2024, 11,  7), date(2025, 2, 11),
+        date(2025, 5,  6), date(2025, 8,  5), date(2025, 11,  4), date(2026, 2, 10),
+    ],
+    "TSLA": [
+        date(2024, 4, 23), date(2024, 7, 23), date(2024, 10, 23), date(2025, 1, 29),
+        date(2025, 4, 22), date(2025, 7, 22), date(2025, 10, 22), date(2026, 4, 22),
+    ],
+    "NVDA": [
+        date(2024, 5, 22), date(2024, 8, 28), date(2024, 11, 20), date(2025, 2, 26),
+        date(2025, 5, 28), date(2025, 8, 27), date(2025, 11, 19), date(2026, 2, 26),
+    ],
+    "COIN": [
+        date(2024, 5,  2), date(2024, 8,  1), date(2024, 10, 30), date(2025, 2, 13),
+        date(2025, 5,  8), date(2025, 8,  7), date(2025, 11,  6), date(2026, 2, 12),
+    ],
+    "MARA": [
+        date(2024, 5,  8), date(2024, 8,  7), date(2024, 11,  5), date(2025, 2, 25),
+        date(2025, 5,  8), date(2025, 7, 29), date(2025, 11,  4), date(2026, 3,  4),
+    ],
+    "AFRM": [
+        date(2024, 5,  9), date(2024, 8,  8), date(2024, 11,  7), date(2025, 2,  6),
+        date(2025, 5, 14), date(2025, 8,  7), date(2025, 11,  6), date(2026, 2,  5),
     ],
 }
 
@@ -482,7 +480,7 @@ def run_backtest_engine(months=12):
     # Fetch enough history for MA calculations (need 60+ days before start)
     fetch_start = (start_date - timedelta(days=120)).strftime("%Y-%m-%d")
     price_cache = {}
-    all_tickers = list(set(TICKERS))
+    all_tickers = list(set(TICKERS + STRADDLE_TICKERS))
     for i, ticker in enumerate(all_tickers):
         backtest_status["progress"] = f"Downloading {ticker} ({i+1}/{len(all_tickers)})…"
         df = get_prices(ticker, start=fetch_start)
@@ -502,9 +500,10 @@ def run_backtest_engine(months=12):
                 sig["date"] = str(sim_date)
                 day_buys.append(sig)
                 seen_today.add(ticker)
-            # Straddle — pass as_of_date so it uses historical earnings lookup
-            strad = straddle_signal(ticker, df=price_cache[ticker],
-                                    as_of_date=sim_date)
+
+        for ticker in STRADDLE_TICKERS:
+            if ticker not in price_cache: continue
+            strad = straddle_signal(ticker, df=price_cache[ticker], as_of_date=sim_date)
             if strad and strad.get("is_buy"):
                 strad["date"] = str(sim_date)
                 day_buys.append(strad)
@@ -608,6 +607,8 @@ def run_pipeline():
                 new_signals.append(sig)
                 if sig.get("is_buy"):
                     seen_live.add(ticker)
+
+        for ticker in STRADDLE_TICKERS:
             strad = straddle_signal(ticker)
             if strad:
                 strad["date"] = today_str
@@ -717,45 +718,38 @@ def api_backtest_results():
 
 @app.route("/api/ticker-stats")
 def api_ticker_stats():
-    """Per-ticker win rate, avg return, trade count from all closed trades (live + backtest)."""
     live_trades = load_json(TRADES_FILE, [])
     bt_data     = load_json(BACKTEST_FILE, None)
     bt_trades   = bt_data.get("trades", []) if bt_data else []
+    all_closed  = [t for t in live_trades + bt_trades if t.get("status") == "closed"]
 
-    # Merge: prefer backtest for historical depth, live for recency
-    all_closed = [t for t in live_trades if t.get("status") == "closed"] + \
-                 [t for t in bt_trades   if t.get("status") == "closed"]
-
+    # Build stats keyed by (ticker, strategy)
     stats = {}
     for t in all_closed:
-        key = t["ticker"]
+        key = (t["ticker"], t.get("strategy","CALL+HEDGE"))
         if key not in stats:
-            stats[key] = {"ticker": key, "trades": [], "wins": 0}
+            stats[key] = {"ticker": t["ticker"], "strategy": t.get("strategy","CALL+HEDGE"),
+                          "trades": [], "wins": 0}
         ret = t.get("return_pct", 0)
         stats[key]["trades"].append(ret)
         if ret > 0:
             stats[key]["wins"] += 1
 
     result = []
-    for k, v in stats.items():
+    for (ticker, strategy), v in stats.items():
         n       = len(v["trades"])
         wr      = round(v["wins"] / n * 100, 1) if n else 0
         avg     = round(sum(v["trades"]) / n, 1) if n else 0
         best    = round(max(v["trades"]), 1) if n else 0
         worst   = round(min(v["trades"]), 1) if n else 0
-        verdict = "trade"   if wr >= 45 else \
-                  "caution" if wr >= 30 else "skip"
+        verdict = "trade" if wr >= 45 else "caution" if wr >= 30 else "skip"
         result.append({
-            "ticker":   k,
-            "trades":   n,
-            "win_rate": wr,
-            "avg_ret":  avg,
-            "best":     best,
-            "worst":    worst,
-            "verdict":  verdict,
+            "ticker": ticker, "strategy": strategy,
+            "trades": n, "win_rate": wr, "avg_ret": avg,
+            "best": best, "worst": worst, "verdict": verdict,
         })
 
-    result.sort(key=lambda x: x["win_rate"], reverse=True)
+    result.sort(key=lambda x: (x["strategy"], -x["win_rate"]))
     return jsonify(result)
 
 @app.route("/api/market-report")
@@ -1479,35 +1473,57 @@ async function loadTickerStats(){
     document.getElementById('stats-list').innerHTML='<div class="empty">Run the backtest first to see per-ticker breakdown.</div>';
     return;
   }
-  const total=stats.reduce((a,s)=>a+s.trades,0);
-  document.getElementById('stats-source').textContent=total+' closed trades analysed · sorted by win rate';
-  document.getElementById('stats-list').innerHTML=stats.map(s=>{
-    const col=s.verdict==='trade'?'#22c55e':s.verdict==='caution'?'#f59e0b':'#ef4444';
-    const bgTag=s.verdict==='trade'?'background:#14532d;color:#86efac':
-                s.verdict==='caution'?'background:#451a03;color:#fcd34d':
-                'background:#450a0a;color:#fca5a5';
-    const barW=Math.min(Math.max(s.win_rate,0),100);
-    const avgCol=s.avg_ret>0?'#22c55e':s.avg_ret<0?'#ef4444':'var(--muted)';
-    return `<div class="trow">
-      <div class="cdot" style="width:8px;height:8px;border-radius:50%;background:${col};flex-shrink:0;margin-top:2px"></div>
-      <div style="width:46px;flex-shrink:0;font-size:14px;font-weight:700;font-family:var(--mono);color:var(--text)">${s.ticker}</div>
-      <div style="flex:1;min-width:0">
-        <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
-          <div style="flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden">
-            <div style="width:${barW}%;height:5px;background:${col};border-radius:3px"></div>
+  const calls     = stats.filter(s=>s.strategy==='CALL+HEDGE');
+  const straddles = stats.filter(s=>s.strategy==='STRADDLE');
+  const total     = stats.reduce((a,s)=>a+s.trades,0);
+  document.getElementById('stats-source').textContent=total+' closed trades · sorted by win rate';
+
+  function renderRows(arr){
+    if(!arr.length) return '<div class="empty" style="padding:12px 0">No data — run backtest</div>';
+    return arr.map(s=>{
+      const col=s.verdict==='trade'?'#22c55e':s.verdict==='caution'?'#f59e0b':'#ef4444';
+      const bgTag=s.verdict==='trade'?'background:#14532d;color:#86efac':
+                  s.verdict==='caution'?'background:#451a03;color:#fcd34d':
+                  'background:#450a0a;color:#fca5a5';
+      const barW=Math.min(Math.max(s.win_rate,0),100);
+      const avgCol=s.avg_ret>0?'#22c55e':s.avg_ret<0?'#ef4444':'var(--muted)';
+      return `<div class="trow" style="margin-bottom:6px">
+        <div style="width:8px;height:8px;border-radius:50%;background:${col};flex-shrink:0;margin-top:2px"></div>
+        <div style="width:46px;flex-shrink:0;font-size:14px;font-weight:700;font-family:var(--mono);color:var(--text)">${s.ticker}</div>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+            <div style="flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden">
+              <div style="width:${barW}%;height:5px;background:${col};border-radius:3px"></div>
+            </div>
+            <span style="font-size:12px;font-family:var(--mono);color:${col};font-weight:500;min-width:36px;text-align:right">${s.win_rate}%</span>
           </div>
-          <span style="font-size:12px;font-family:var(--mono);color:${col};font-weight:500;min-width:36px;text-align:right">${s.win_rate}%</span>
+          <div style="font-size:11px;font-family:var(--mono);color:var(--muted)">
+            avg <span style="color:${avgCol}">${s.avg_ret>=0?'+':''}${s.avg_ret}%</span>
+            &nbsp;·&nbsp; best <span style="color:#22c55e">+${s.best}%</span>
+            &nbsp;·&nbsp; worst <span style="color:#ef4444">${s.worst}%</span>
+            &nbsp;·&nbsp; ${s.trades} trades
+          </div>
         </div>
-        <div style="font-size:11px;font-family:var(--mono);color:var(--muted)">
-          avg <span style="color:${avgCol}">${s.avg_ret>=0?'+':''}${s.avg_ret}%</span>
-          &nbsp;·&nbsp; best <span style="color:#22c55e">+${s.best}%</span>
-          &nbsp;·&nbsp; worst <span style="color:#ef4444">${s.worst}%</span>
-          &nbsp;·&nbsp; ${s.trades} trades
-        </div>
-      </div>
-      <div style="font-size:10px;font-family:var(--mono);font-weight:500;padding:2px 8px;border-radius:4px;flex-shrink:0;${bgTag}">${s.verdict}</div>
+        <div style="font-size:10px;font-family:var(--mono);font-weight:500;padding:2px 8px;border-radius:4px;flex-shrink:0;${bgTag}">${s.verdict}</div>
+      </div>`;
+    }).join('');
+  }
+
+  document.getElementById('stats-list').innerHTML=`
+    <div style="font-size:11px;font-weight:600;color:var(--text);font-family:var(--mono);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;padding-bottom:6px;border-bottom:0.5px solid var(--border)">
+      📈 Call + Hedge
+    </div>
+    ${renderRows(calls)}
+    <div style="height:20px"></div>
+    <div style="font-size:11px;font-weight:600;color:var(--text);font-family:var(--mono);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;padding-bottom:6px;border-bottom:0.5px solid var(--border)">
+      🔀 Straddle — earnings plays
+    </div>
+    ${renderRows(straddles)}
+    <div style="height:8px"></div>
+    <div style="font-size:11px;color:var(--muted);font-family:var(--mono);line-height:1.6">
+      green = trade it (45%+) &nbsp;·&nbsp; amber = caution &nbsp;·&nbsp; red = skip it<br>
+      straddle tickers tested: RIOT HOOD SOFI UPST TSLA NVDA COIN MARA AFRM
     </div>`;
-  }).join('');
 }
 
 async function clearTrades(){
