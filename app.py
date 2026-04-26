@@ -755,60 +755,81 @@ def api_market_report():
         log.warning(f"market_report: {e}")
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/stock-summary/<ticker>")
-def api_stock_summary(ticker):
-    """Full summary for a single ticker — stats, last 5 trades, confidence score."""
+@app.route("/api/stock-summary/<ticker>/<strategy>")
+def api_stock_summary(ticker, strategy):
+    """Full summary for a single ticker+strategy combo."""
     try:
-        # Pull historical stats
         live_trades = load_json(TRADES_FILE, [])
         bt_data     = load_json(BACKTEST_FILE, None)
         bt_trades   = bt_data.get("trades", []) if bt_data else []
-        all_closed  = [t for t in live_trades + bt_trades
-                       if t.get("status") == "closed" and t.get("ticker") == ticker]
+
+        # Filter by ticker AND strategy
+        all_closed = [t for t in live_trades + bt_trades
+                      if t.get("status") == "closed"
+                      and t.get("ticker") == ticker
+                      and t.get("strategy") == strategy]
         all_closed.sort(key=lambda t: t.get("exit_date",""))
 
-        n       = len(all_closed)
-        returns = [t.get("return_pct", 0) for t in all_closed]
-        wins    = [r for r in returns if r > 0]
+        n        = len(all_closed)
+        returns  = [t.get("return_pct", 0) for t in all_closed]
+        wins     = [r for r in returns if r > 0]
         win_rate = round(len(wins)/n*100, 1) if n else 0
         avg_ret  = round(sum(returns)/n, 1) if n else 0
         last5    = all_closed[-5:] if n >= 5 else all_closed
 
-        # Today's signal details
+        # Today's signal
         today_str = str(date.today())
         signals   = load_json(SIGNALS_FILE, [])
         today_sig = next((s for s in signals
-                          if s.get("ticker")==ticker and s.get("date")==today_str), None)
+                          if s.get("ticker")==ticker
+                          and s.get("strategy")==strategy
+                          and s.get("date")==today_str), None)
 
-        # Confidence score 1-10
+        # Strategy-specific confidence score
         score = 5
         if today_sig and today_sig.get("is_buy"):
-            if today_sig.get("pullback_pct", 0) >= 4:   score += 1
-            if today_sig.get("pullback_pct", 0) >= 6:   score += 1
-            rsi = today_sig.get("rsi", 50)
-            if 40 <= rsi <= 60:                          score += 1
-            if today_sig.get("vol_ratio", 1) >= 1.2:    score += 1
-            if win_rate >= 60:                           score += 1
-            score = min(score, 10)
+            if strategy == "CALL+HEDGE":
+                if today_sig.get("pullback_pct", 0) >= 4:  score += 1
+                if today_sig.get("pullback_pct", 0) >= 6:  score += 1
+                rsi = today_sig.get("rsi", 50)
+                if 40 <= rsi <= 60:                         score += 1
+                if today_sig.get("vol_ratio", 1) >= 1.2:   score += 1
+                if win_rate >= 60:                          score += 1
+            else:  # STRADDLE
+                days_to_earn = today_sig.get("days_to_earnings", 99)
+                if days_to_earn <= 4:                       score += 2  # closer = better
+                elif days_to_earn <= 6:                     score += 1
+                vol_range = today_sig.get("vol_range_pct", 0)
+                if 4 <= vol_range <= 8:                     score += 2  # sweet spot
+                elif vol_range < 4:                         score -= 1  # too quiet
+                if win_rate >= 55:                          score += 1
+            score = min(max(score, 0), 10)
         elif today_sig and not today_sig.get("is_buy"):
             score = 0
 
+        # Straddle-specific: breakeven move needed
+        breakeven_pct = None
+        if strategy == "STRADDLE" and today_sig:
+            breakeven_pct = round(STRAD_COST_PCT * 100, 1)  # need > 8% move to profit
+
         return jsonify({
-            "ticker":    ticker,
-            "n_trades":  n,
-            "win_rate":  win_rate,
-            "avg_ret":   avg_ret,
-            "best":      round(max(returns), 1) if returns else 0,
-            "worst":     round(min(returns), 1) if returns else 0,
-            "last5":     [{"exit_date": t.get("exit_date",""),
-                           "return_pct": t.get("return_pct",0),
-                           "entry_price": t.get("entry_price",0),
-                           "exit_price": t.get("exit_price",0)} for t in last5],
-            "today_signal": today_sig,
-            "confidence": score,
+            "ticker":         ticker,
+            "strategy":       strategy,
+            "n_trades":       n,
+            "win_rate":       win_rate,
+            "avg_ret":        avg_ret,
+            "best":           round(max(returns), 1) if returns else 0,
+            "worst":          round(min(returns), 1) if returns else 0,
+            "last5":          [{"exit_date": t.get("exit_date",""),
+                                "return_pct": t.get("return_pct",0),
+                                "entry_price": t.get("entry_price",0),
+                                "exit_price": t.get("exit_price",0)} for t in last5],
+            "today_signal":   today_sig,
+            "confidence":     score,
+            "breakeven_pct":  breakeven_pct,
         })
     except Exception as e:
-        log.warning(f"stock_summary {ticker}: {e}")
+        log.warning(f"stock_summary {ticker}/{strategy}: {e}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -1150,17 +1171,46 @@ async function loadMarketReport(){
   }catch(e){document.getElementById('market-body').innerHTML='<span style="color:var(--muted);font-size:12px;font-family:var(--mono)">Market data unavailable</span>';}
 }
 
-async function loadStockSummary(ticker, cardEl){
+async function loadStockSummary(ticker, strategy, cardEl){
   try{
-    const s=await(await fetch('/api/stock-summary/'+ticker)).json();
+    const s=await(await fetch(`/api/stock-summary/${ticker}/${strategy}`)).json();
     if(s.error) return;
+
     const last5html=s.last5.map(t=>{
       const ret=t.return_pct||0;
-      const col=ret>0?'#22c55e':'#ef4444';
       return `<span title="${t.exit_date} ${ret>=0?'+':''}${ret.toFixed(0)}%" style="cursor:default;font-size:16px">${ret>0?'✅':'❌'}</span>`;
     }).join(' ');
+
     const confCol=s.confidence>=7?'#22c55e':s.confidence>=4?'#f59e0b':'#ef4444';
     const confBar=`<div style="display:inline-flex;gap:2px">${Array.from({length:10},(_,i)=>`<div style="width:8px;height:8px;border-radius:2px;background:${i<s.confidence?confCol:'var(--border)'}"></div>`).join('')}</div>`;
+
+    let strategyDetail = '';
+    if(strategy === 'CALL+HEDGE'){
+      const sig = s.today_signal || {};
+      strategyDetail = `
+        <div style="font-size:11px;color:var(--muted);font-family:var(--mono);margin-bottom:8px;line-height:1.7">
+          ${sig.is_buy ? `
+            <span style="color:#86efac">▸ Entry signal active</span><br>
+            Pullback: <b style="color:var(--text)">${sig.pullback_pct||0}%</b> from recent high &nbsp;·&nbsp;
+            RSI: <b style="color:var(--text)">${sig.rsi||'—'}</b> &nbsp;·&nbsp;
+            Volume: <b style="color:var(--text)">${sig.vol_ratio||'—'}x</b> avg<br>
+            Hold 10 trading days · hedge call if it gains 20%
+          ` : `<span style="color:var(--muted)">${sig.detail||'No signal today'}</span>`}
+        </div>`;
+    } else {
+      const sig = s.today_signal || {};
+      strategyDetail = `
+        <div style="font-size:11px;color:var(--muted);font-family:var(--mono);margin-bottom:8px;line-height:1.7">
+          ${sig.is_buy ? `
+            <span style="color:#93c5fd">▸ Straddle signal active</span><br>
+            Earnings in <b style="color:var(--text)">${sig.days_to_earnings||'?'} days</b> (${sig.earnings_date||'?'})<br>
+            Need stock to move <b style="color:var(--text)">${s.breakeven_pct||8}%+</b> in either direction to profit<br>
+            10d volatility range: <b style="color:var(--text)">${sig.vol_range_pct||'?'}%</b> &nbsp;·&nbsp; RSI: <b style="color:var(--text)">${sig.rsi||'—'}</b><br>
+            Buy CALL + PUT at same strike · hold 5 days · no hedge needed
+          ` : `<span style="color:var(--muted)">${sig.detail||'No straddle signal today'}</span>`}
+        </div>`;
+    }
+
     const summaryHtml=`
       <div style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--border)">
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px">
@@ -1177,14 +1227,16 @@ async function loadStockSummary(ticker, cardEl){
           <div style="background:var(--surface2);border-radius:8px;padding:8px 10px">
             <div style="font-size:10px;color:var(--muted);font-family:var(--mono);text-transform:uppercase">Confidence</div>
             <div style="font-size:18px;font-weight:600;color:${confCol}">${s.confidence}/10</div>
-            <div style="font-size:10px;color:var(--muted);font-family:var(--mono)">today</div>
+            <div style="font-size:10px;color:var(--muted);font-family:var(--mono)">${strategy==='STRADDLE'?'earnings setup':'today'}</div>
           </div>
         </div>
+        ${strategyDetail}
         <div style="font-size:11px;color:var(--muted);font-family:var(--mono);margin-bottom:6px">Last ${s.last5.length} trades:</div>
-        <div style="margin-bottom:8px">${last5html}</div>
+        <div style="margin-bottom:8px">${last5html||'—'}</div>
         <div style="margin-bottom:6px">${confBar}</div>
         <div style="font-size:10px;color:var(--muted);font-family:var(--mono)">Best +${s.best}% · Worst ${s.worst}%</div>
       </div>`;
+
     const body=cardEl.querySelector('.cbody');
     const existing=body.querySelector('.summary-expand');
     if(existing){existing.remove();return;}
@@ -1200,7 +1252,7 @@ async function loadSignals(ds){
   const el=document.getElementById('siglist');
   if(!sigs.length){el.innerHTML='<div class="empty">No signals for '+ds+'. Hit Run ↗.</div>';return;}
   el.innerHTML=sigs.map(s=>`
-    <div class="card ${s.is_buy?'bc':''}" onclick="loadStockSummary('${s.ticker}',this)" style="cursor:pointer">
+    <div class="card ${s.is_buy?'bc':''}" onclick="loadStockSummary('${s.ticker}','${s.strategy}',this)" style="cursor:pointer">
       <div class="cdot ${s.is_buy?'bdot':'ndot'}"></div>
       <div class="cbody">
         <div class="ctop">
