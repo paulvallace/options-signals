@@ -26,9 +26,9 @@ SIGNALS_FILE   = DATA_DIR / "signals.json"
 TRADES_FILE    = DATA_DIR / "trades.json"
 BACKTEST_FILE  = DATA_DIR / "backtest.json"
 
-TICKERS         = ["RIOT", "HOOD", "SOFI", "UPST"]   # call+hedge — proven 50%+ win rate
-STRADDLE_TICKERS = ["RIOT", "HOOD", "SOFI", "UPST",  # test straddles on all of these
-                    "TSLA", "NVDA", "COIN", "MARA", "AFRM"]
+TICKERS          = ["RIOT", "HOOD", "SOFI", "UPST"]        # call+hedge — all 4 green 50%+
+STRADDLE_TICKERS = ["UPST", "MARA", "COIN", "RIOT"]        # straddle — 50%+ win rate only
+# REMOVED from straddle: HOOD (43% -avg), SOFI (40% -avg), AFRM (33%), TSLA (0%), NVDA (0%)
 ACCOUNT_SIZE  = 2_000
 RISK_PCT      = 0.03   # 3% risk per trade (realistic — between 1-5%)
 MA_WINDOWS     = [20, 50]
@@ -135,29 +135,14 @@ def trading_days_in_range(start_date, end_date):
 # yfinance only returns FUTURE earnings dates, not historical ones.
 # Format: "TICKER": [date, date, ...] — actual report dates
 HISTORICAL_EARNINGS = {
+    # Active straddle tickers — 50%+ win rate
     "RIOT": [
-        date(2024, 5,  8), date(2024, 8,  7), date(2024, 11, 6), date(2025, 2, 24),
-        date(2025, 5,  7), date(2025, 8,  6), date(2025, 10, 29), date(2026, 3, 2),
-    ],
-    "HOOD": [
-        date(2024, 5,  8), date(2024, 8,  7), date(2024, 10, 30), date(2025, 2, 12),
-        date(2025, 4, 30), date(2025, 8,  6), date(2025, 11,  5), date(2026, 2, 10),
-    ],
-    "SOFI": [
-        date(2024, 4, 29), date(2024, 7, 30), date(2024, 10, 29), date(2025, 1, 27),
-        date(2025, 4, 28), date(2025, 7, 29), date(2025, 10, 28), date(2026, 1, 30),
+        date(2024, 5,  8), date(2024, 8,  7), date(2024, 11, 6),  date(2025, 2, 24),
+        date(2025, 5,  7), date(2025, 8,  6), date(2025, 10, 29), date(2026, 3,  2),
     ],
     "UPST": [
         date(2024, 5,  7), date(2024, 8,  6), date(2024, 11,  7), date(2025, 2, 11),
         date(2025, 5,  6), date(2025, 8,  5), date(2025, 11,  4), date(2026, 2, 10),
-    ],
-    "TSLA": [
-        date(2024, 4, 23), date(2024, 7, 23), date(2024, 10, 23), date(2025, 1, 29),
-        date(2025, 4, 22), date(2025, 7, 22), date(2025, 10, 22), date(2026, 4, 22),
-    ],
-    "NVDA": [
-        date(2024, 5, 22), date(2024, 8, 28), date(2024, 11, 20), date(2025, 2, 26),
-        date(2025, 5, 28), date(2025, 8, 27), date(2025, 11, 19), date(2026, 2, 26),
     ],
     "COIN": [
         date(2024, 5,  2), date(2024, 8,  1), date(2024, 10, 30), date(2025, 2, 13),
@@ -167,9 +152,14 @@ HISTORICAL_EARNINGS = {
         date(2024, 5,  8), date(2024, 8,  7), date(2024, 11,  5), date(2025, 2, 25),
         date(2025, 5,  8), date(2025, 7, 29), date(2025, 11,  4), date(2026, 3,  4),
     ],
-    "AFRM": [
-        date(2024, 5,  9), date(2024, 8,  8), date(2024, 11,  7), date(2025, 2,  6),
-        date(2025, 5, 14), date(2025, 8,  7), date(2025, 11,  6), date(2026, 2,  5),
+    # Call+hedge tickers — kept for reference (not used for straddles)
+    "HOOD": [
+        date(2024, 5,  8), date(2024, 8,  7), date(2024, 10, 30), date(2025, 2, 12),
+        date(2025, 4, 30), date(2025, 8,  6), date(2025, 11,  5), date(2026, 2, 10),
+    ],
+    "SOFI": [
+        date(2024, 4, 29), date(2024, 7, 30), date(2024, 10, 29), date(2025, 1, 27),
+        date(2025, 4, 28), date(2025, 7, 29), date(2025, 10, 28), date(2026, 1, 30),
     ],
 }
 
@@ -401,8 +391,13 @@ def simulate_trade_return(trade, price_df):
         if not locs:
             return None
         entry_loc = locs[0]
-        exit_loc  = min(entry_loc + hold, len(close) - 1)
 
+        # Skip if we don't have enough future data for the full hold period
+        # A trade entered too close to the end of available data is incomplete
+        if entry_loc + hold > len(close) - 1:
+            return None  # not enough data — skip this trade entirely
+
+        exit_loc = entry_loc + hold
         ep = float(close.iloc[entry_loc])
         xp = float(close.iloc[exit_loc])
 
@@ -1105,7 +1100,7 @@ body{min-height:100vh;padding-bottom:calc(env(safe-area-inset-bottom) + 16px);}
   </div>
   <div style="height:10px"></div>
   <div style="padding:0 20px;font-size:11px;color:var(--muted);font-family:var(--mono);line-height:1.7">
-    green = trade it (45%+ win rate) &nbsp;·&nbsp; amber = caution &nbsp;·&nbsp; red = skip it
+    green = trade it (45%+ win rate) &nbsp;·&nbsp; amber = monitor only &nbsp;·&nbsp; red = skip it
   </div>
   <div style="height:16px"></div>
 </div>
@@ -1115,41 +1110,50 @@ body{min-height:100vh;padding-bottom:calc(env(safe-area-inset-bottom) + 16px);}
 
     <div class="howto-card">
       <div class="howto-head">Your daily routine</div>
-      <div class="howto-step"><div class="step-num">1</div><div class="step-text">Open the app each morning. If the green dot is lit and shows today's date — you're good, signals already ran at 9am.<div class="step-sub">If it says "Never run" — tap the green Run ↗ button and wait 60 seconds.</div></div></div>
-      <div class="howto-step"><div class="step-num">2</div><div class="step-text">Look at the Today tab. Ignore all gray cards. You only care about cards with a <span class="badge-green">BUY</span> badge.</div></div>
-      <div class="howto-step"><div class="step-num">3</div><div class="step-text">If a BUY fires on SOFI or DKNG — those are the only two worth acting on right now. Go place the trade in your broker.</div></div>
-      <div class="howto-step"><div class="step-num">4</div><div class="step-text">Come back every morning and check for the orange ⚡ hedge alert banner at the top. If it appears — act on it immediately.</div></div>
-      <div class="howto-step"><div class="step-num">5</div><div class="step-text">At day 10, go close the trade in your broker. Sell everything regardless of where it is.</div></div>
+      <div class="howto-step"><div class="step-num">1</div><div class="step-text">Open the app each morning. If the green dot shows today's date — signals already ran at 9am automatically.<div class="step-sub">If it says "Never run" or yesterday — tap Run ↗ and wait 60 seconds.</div></div></div>
+      <div class="howto-step"><div class="step-num">2</div><div class="step-text">Check the Today tab. Ignore all gray cards. Only act on green <span class="badge-green">BUY</span> cards.</div></div>
+      <div class="howto-step"><div class="step-num">3</div><div class="step-text">Tap any BUY card to see the full summary — win rate, last 5 trades, confidence score, and exact action steps.</div></div>
+      <div class="howto-step"><div class="step-num">4</div><div class="step-text">Check for the orange ⚡ hedge alert banner every morning. If it appears — act immediately.<div class="step-sub">This means your call is up 20%+ and it's time to buy a put to lock in profit.</div></div></div>
+      <div class="howto-step"><div class="step-num">5</div><div class="step-text">At day 10 for calls, day 5 for straddles — go close everything in your broker.<div class="step-sub">Sell regardless of where it is. Don't wait hoping it recovers.</div></div></div>
     </div>
 
     <div class="howto-card">
-      <div class="howto-head"><span class="badge-green" style="font-size:12px">CALL+HEDGE</span>&nbsp; Step by step</div>
-      <div class="howto-step"><div class="step-num">1</div><div class="step-text">Signal fires → go to your broker → search the ticker (e.g. SOFI)<div class="step-sub">Tap Options → Calls → pick expiration ~2 weeks out</div></div></div>
-      <div class="howto-step"><div class="step-num">2</div><div class="step-text">Pick a strike price at or just above today's stock price<div class="step-sub">Example: SOFI at $18.50 → buy the $19 call</div></div></div>
-      <div class="howto-step"><div class="step-num">3</div><div class="step-text">Buy 1 contract to start. Risk 1–5% of your account per trade maximum.<div class="step-sub">Example: $2,000 account → risk $60–$100 per trade maximum</div></div></div>
-      <div class="howto-step"><div class="step-num">4</div><div class="step-text">Watch for the ⚡ hedge alert. If your call is up 20%+ the app will show an orange banner.<div class="step-sub">When that fires → go buy 1 Put at the same expiration, same strike. This locks in your profit.</div></div></div>
-      <div class="howto-step"><div class="step-num">5</div><div class="step-text">At day 10 → sell everything. Close the call and the put if you bought one.<div class="step-sub">Don't wait longer. Take whatever profit or loss is there.</div></div></div>
-      <div class="howto-rule"><b>Why it works:</b> You buy a cheap ticket that pays big if the stock goes up. If it rockets, you buy insurance to protect the gain. If it goes nowhere, you only lose what you paid for the ticket — nothing more.</div>
+      <div class="howto-head"><span class="badge-green" style="font-size:12px">CALL+HEDGE</span>&nbsp; When to trade &amp; what to do</div>
+      <div class="howto-rule" style="margin-bottom:12px">
+        <b>Trade these tickers only (proven 50%+ win rate):</b><br>
+        RIOT · HOOD · SOFI · UPST
+      </div>
+      <div class="howto-step"><div class="step-num">1</div><div class="step-text">Green BUY fires → open your broker → search the ticker<div class="step-sub">Tap Options → Calls → pick expiration 2 weeks out from today</div></div></div>
+      <div class="howto-step"><div class="step-num">2</div><div class="step-text">Pick the strike price at or just above today's stock price<div class="step-sub">RIOT at $18 → buy the $18.50 or $19 call · SOFI at $16 → buy the $16.50 or $17 call</div></div></div>
+      <div class="howto-step"><div class="step-num">3</div><div class="step-text">Buy 1 contract · risk max 1–5% of your account<div class="step-sub">$2,000 account → spend max $60–$100 on the option premium</div></div></div>
+      <div class="howto-step"><div class="step-num">4</div><div class="step-text">⚡ If the orange hedge alert fires → go buy 1 Put immediately<div class="step-sub">Same ticker · same strike · same expiration · this locks in your profit</div></div></div>
+      <div class="howto-step"><div class="step-num">5</div><div class="step-text">Day 10 → sell everything · close the call + put if you bought one<div class="step-sub">Take the result. Win or lose. Move on.</div></div></div>
+      <div class="howto-rule"><b>You win when:</b> Stock goes up more than 5% over 10 days.<br><b>You lose when:</b> Stock goes sideways or down — you lose the premium only, not more.<br><b>You protect gains when:</b> Call is up 20%+ → hedge fires → you buy the put.</div>
     </div>
 
     <div class="howto-card">
-      <div class="howto-head"><span class="badge-blue" style="font-size:12px">STRADDLE</span>&nbsp; Step by step</div>
-      <div class="howto-rule" style="margin-bottom:10px">Only use this when earnings are 3–7 days away. The app only fires this signal near earnings.</div>
-      <div class="howto-step"><div class="step-num">1</div><div class="step-text">Signal fires → go to your broker → search the ticker<div class="step-sub">Tap Options → pick expiration ~1 week out</div></div></div>
-      <div class="howto-step"><div class="step-num">2</div><div class="step-text">Buy 1 Call AND 1 Put — both at the same strike price (current stock price)<div class="step-sub">Yes, you're buying both at the same time. That's the straddle.</div></div></div>
-      <div class="howto-step"><div class="step-num">3</div><div class="step-text">Don't touch it. Let earnings happen. The stock will move big.<div class="step-sub">No hedge needed — the put is already built in.</div></div></div>
-      <div class="howto-step"><div class="step-num">4</div><div class="step-text">At day 5 → sell both the call and the put.<div class="step-sub">One will be worth a lot. The other nearly worthless. Sell both anyway.</div></div></div>
-      <div class="howto-rule"><b>Why it works:</b> Earnings cause big moves — up OR down. You win either way as long as the stock moves more than ~8%. If the stock barely reacts to earnings, you lose the premium on both options.</div>
+      <div class="howto-head"><span class="badge-blue" style="font-size:12px">STRADDLE</span>&nbsp; When to trade &amp; what to do</div>
+      <div class="howto-rule" style="margin-bottom:12px">
+        <b>Trade these tickers only (50%+ win rate for straddles):</b><br>
+        UPST · MARA · COIN · RIOT<br>
+        <b>Only when earnings are 3–7 days away.</b> The app signals this automatically.
+      </div>
+      <div class="howto-step"><div class="step-num">1</div><div class="step-text">Green BUY straddle fires → open your broker → search the ticker<div class="step-sub">Tap Options → pick expiration 1 week out from today</div></div></div>
+      <div class="howto-step"><div class="step-num">2</div><div class="step-text">Buy 1 Call AND 1 Put at the same strike price (at today's stock price)<div class="step-sub">UPST at $50 → buy the $50 call AND the $50 put · same expiration</div></div></div>
+      <div class="howto-step"><div class="step-num">3</div><div class="step-text">Do nothing. Let earnings happen. The stock will move.<div class="step-sub">No hedge needed — the put is already built in. Just wait.</div></div></div>
+      <div class="howto-step"><div class="step-num">4</div><div class="step-text">Day 5 → sell both the call AND the put<div class="step-sub">One will be worth a lot. The other nearly worthless. Sell both regardless.</div></div></div>
+      <div class="howto-rule"><b>You win when:</b> Stock moves more than 8% in either direction after earnings.<br><b>You lose when:</b> Stock barely moves after earnings — you lose both premiums.<br><b>Never use for TSLA or NVDA</b> — their moves are already priced into the options.</div>
     </div>
 
     <div class="howto-card">
       <div class="howto-head">Golden rules</div>
       <div class="howto-rule">
-        <b>Never risk more than 1–5%</b> of your account on one trade. $2,000 account = $60–$100 max per trade.<br>
-        <b>Only trade green tickers</b> — check the Ticker stats tab. Only SOFI and DKNG are green right now.<br>
-        <b>Always close at day 10</b> — don't hold longer hoping it recovers. Take the result and move on.<br>
-        <b>The app never touches your money</b> — it only tells you when. You place the trade yourself in your broker.<br>
-        <b>-100% means the option expired worthless</b> — you lost the premium, not your whole account. Premium = 5% of stock price per share.
+        <b>Never risk more than 1–5%</b> of your account per trade. $2,000 account = $60–$100 max per trade.<br><br>
+        <b>Call+Hedge green tickers:</b> RIOT · HOOD · SOFI · UPST<br>
+        <b>Straddle green tickers:</b> UPST · MARA · COIN · RIOT<br><br>
+        <b>Always close on time</b> — day 10 for calls, day 5 for straddles. No exceptions.<br><br>
+        <b>The app never touches your money</b> — it only tells you when. You place the trade yourself.<br><br>
+        <b>-100% means the option expired worthless</b> — you lost the premium only, not your whole account. Premium = roughly 5% of stock price per share.
       </div>
     </div>
 
@@ -1306,20 +1310,47 @@ async function loadSignals(ds){
   const sigs=await(await fetch('/api/signals?date='+ds)).json();
   const el=document.getElementById('siglist');
   if(!sigs.length){el.innerHTML='<div class="empty">No signals for '+ds+'. Hit Run ↗.</div>';return;}
-  el.innerHTML=sigs.map(s=>`
-    <div class="card ${s.is_buy?'bc':''}" onclick="loadStockSummary('${s.ticker}','${s.strategy}',this)" style="cursor:pointer">
-      <div class="cdot ${s.is_buy?'bdot':'ndot'}"></div>
+  el.innerHTML=sigs.map(s=>{
+    const isBuy=s.is_buy;
+    const isStraddle=s.strategy==='STRADDLE';
+    let actionHtml='';
+    if(isBuy && isStraddle){
+      actionHtml=`<div style="margin-top:8px;padding:8px 10px;background:#0d1a2e;border-radius:8px;border:0.5px solid #1e3a5f">
+        <div style="font-size:11px;color:#93c5fd;font-family:var(--mono);font-weight:500;margin-bottom:4px">What to do now →</div>
+        <div style="font-size:11px;color:#bfdbfe;font-family:var(--mono);line-height:1.7">
+          1. Open broker → search ${s.ticker}<br>
+          2. Options → expiration ~1 week out<br>
+          3. Buy 1 CALL + 1 PUT at $${parseFloat(s.price).toFixed(2)} strike<br>
+          4. Hold 5 days · sell both after earnings
+        </div>
+      </div>`;
+    } else if(isBuy){
+      actionHtml=`<div style="margin-top:8px;padding:8px 10px;background:#0d1f13;border-radius:8px;border:0.5px solid #1a4a2a">
+        <div style="font-size:11px;color:#86efac;font-family:var(--mono);font-weight:500;margin-bottom:4px">What to do now →</div>
+        <div style="font-size:11px;color:#bbf7d0;font-family:var(--mono);line-height:1.7">
+          1. Open broker → search ${s.ticker}<br>
+          2. Options → Calls → expiration ~2 weeks out<br>
+          3. Buy strike at or just above $${parseFloat(s.price).toFixed(2)}<br>
+          4. Hold 10 trading days · watch for ⚡ hedge alert
+        </div>
+      </div>`;
+    }
+    return `
+    <div class="card ${isBuy?'bc':''}" onclick="loadStockSummary('${s.ticker}','${s.strategy}',this)" style="cursor:pointer">
+      <div class="cdot ${isBuy?'bdot':'ndot'}"></div>
       <div class="cbody">
         <div class="ctop">
           <span class="cticker">${s.ticker}</span>
-          <span class="tag ${s.strategy==='STRADDLE'?'ts':'tc'}">${s.strategy}</span>
-          ${s.is_buy?'<span class="tag tbuy">BUY</span>':''}
-          ${s.is_buy?`<span style="font-size:10px;color:var(--muted);font-family:var(--mono);margin-left:auto">tap for details</span>`:''}
+          <span class="tag ${isStraddle?'ts':'tc'}">${s.strategy}</span>
+          ${isBuy?'<span class="tag tbuy">BUY</span>':''}
+          ${isBuy?`<span style="font-size:10px;color:var(--muted);font-family:var(--mono);margin-left:auto">tap for stats</span>`:''}
         </div>
         <div class="cdet">${s.detail||''}</div>
         ${s.price?`<div class="cprice">$${parseFloat(s.price).toFixed(2)}${s.max_contracts!=null?' · max '+s.max_contracts+' contract'+(s.max_contracts!==1?'s':''):''}</div>`:''}
+        ${actionHtml}
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 function tradingDaysElapsed(entryDateStr) {
@@ -1509,20 +1540,26 @@ async function loadTickerStats(){
     }).join('');
   }
 
+  // Header card helper
+  function sectionHeader(emoji, title, desc, col){
+    return `<div style="background:var(--surface2);border-radius:10px;padding:10px 14px;margin-bottom:10px">
+      <div style="font-size:13px;font-weight:600;color:var(--text);font-family:var(--sans)">${emoji} ${title}</div>
+      <div style="font-size:11px;color:var(--muted);font-family:var(--mono);margin-top:3px">${desc}</div>
+    </div>`;
+  }
+
   document.getElementById('stats-list').innerHTML=`
-    <div style="font-size:11px;font-weight:600;color:var(--text);font-family:var(--mono);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;padding-bottom:6px;border-bottom:0.5px solid var(--border)">
-      📈 Call + Hedge
-    </div>
+    ${sectionHeader('📈','Call + Hedge','Buy a call when the stock dips in an uptrend · hold 10 days · hedge if +20%')}
     ${renderRows(calls)}
     <div style="height:20px"></div>
-    <div style="font-size:11px;font-weight:600;color:var(--text);font-family:var(--mono);text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px;padding-bottom:6px;border-bottom:0.5px solid var(--border)">
-      🔀 Straddle — earnings plays
-    </div>
+    ${sectionHeader('🔀','Straddle — earnings plays','Buy call + put before earnings · hold 5 days · no hedge needed · stock must move 8%+')}
     ${renderRows(straddles)}
-    <div style="height:8px"></div>
-    <div style="font-size:11px;color:var(--muted);font-family:var(--mono);line-height:1.6">
-      green = trade it (45%+) &nbsp;·&nbsp; amber = caution &nbsp;·&nbsp; red = skip it<br>
-      straddle tickers tested: RIOT HOOD SOFI UPST TSLA NVDA COIN MARA AFRM
+    <div style="height:12px"></div>
+    <div style="padding:10px 12px;background:var(--surface2);border-radius:8px;font-size:11px;color:var(--muted);font-family:var(--mono);line-height:1.8">
+      <span style="color:#86efac">●</span> trade = 45%+ win rate &nbsp;·&nbsp;
+      <span style="color:#fcd34d">●</span> caution = 30–45% &nbsp;·&nbsp;
+      <span style="color:#fca5a5">●</span> skip = below 30%<br>
+      TSLA + NVDA removed from straddles — market prices in their earnings moves (0% win rate)
     </div>`;
 }
 
