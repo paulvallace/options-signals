@@ -26,9 +26,8 @@ SIGNALS_FILE   = DATA_DIR / "signals.json"
 TRADES_FILE    = DATA_DIR / "trades.json"
 BACKTEST_FILE  = DATA_DIR / "backtest.json"
 
-TICKERS          = ["RIOT", "HOOD", "SOFI", "UPST", "PLTR"]              # call+hedge — 45%+ win rate
-STRADDLE_TICKERS = ["UPST", "PLTR", "RIOT", "COIN", "HOOD", "AFRM",     # straddle — 48%+ win rate
-                    "MARA", "DKNG"]
+TICKERS          = ["RIOT", "HOOD", "SOFI", "UPST"]               # call+hedge — 50%+ win rate
+STRADDLE_TICKERS = ["UPST", "PLTR", "MARA", "COIN", "RIOT"]      # straddle — 50%+ win rate
 ACCOUNT_SIZE  = 2_000
 RISK_PCT      = 0.03   # 3% risk per trade (realistic — between 1-5%)
 MA_WINDOWS     = [20, 50]
@@ -1170,7 +1169,7 @@ body{min-height:100vh;padding-bottom:calc(env(safe-area-inset-bottom) + 16px);}
       <div class="howto-head"><span class="badge-green" style="font-size:12px">CALL+HEDGE</span>&nbsp; When to trade &amp; what to do</div>
       <div class="howto-rule" style="margin-bottom:12px">
         <b>Trade these tickers only (proven 50%+ win rate):</b><br>
-        RIOT · HOOD · SOFI · UPST · PLTR
+        RIOT · HOOD · SOFI · UPST
       </div>
       <div class="howto-step"><div class="step-num">1</div><div class="step-text">Green BUY fires → open your broker → search the ticker<div class="step-sub">Tap Options → Calls → pick expiration 2 weeks out from today</div></div></div>
       <div class="howto-step"><div class="step-num">2</div><div class="step-text">Pick the strike price at or just above today's stock price<div class="step-sub">RIOT at $18 → buy the $18.50 or $19 call · SOFI at $16 → buy the $16.50 or $17 call</div></div></div>
@@ -1184,7 +1183,7 @@ body{min-height:100vh;padding-bottom:calc(env(safe-area-inset-bottom) + 16px);}
       <div class="howto-head"><span class="badge-blue" style="font-size:12px">STRADDLE</span>&nbsp; When to trade &amp; what to do</div>
       <div class="howto-rule" style="margin-bottom:12px">
         <b>Trade these tickers only (50%+ win rate for straddles):</b><br>
-        UPST · PLTR · RIOT · COIN · HOOD · AFRM · MARA · DKNG<br>
+        UPST · PLTR · MARA · COIN · RIOT<br>
         <b>Only when earnings are 3–7 days away.</b> The app signals this automatically.
       </div>
       <div class="howto-step"><div class="step-num">1</div><div class="step-text">Green BUY straddle fires → open your broker → search the ticker<div class="step-sub">Tap Options → pick expiration 1 week out from today</div></div></div>
@@ -1198,8 +1197,8 @@ body{min-height:100vh;padding-bottom:calc(env(safe-area-inset-bottom) + 16px);}
       <div class="howto-head">Golden rules</div>
       <div class="howto-rule">
         <b>Never risk more than 1–5%</b> of your account per trade. $2,000 account = $60–$100 max per trade.<br><br>
-        <b>Call+Hedge green tickers:</b> RIOT · HOOD · SOFI · UPST · PLTR<br>
-        <b>Straddle green tickers:</b> UPST · PLTR · RIOT · COIN · HOOD · AFRM · MARA · DKNG<br><br>
+        <b>Call+Hedge green tickers:</b> RIOT · HOOD · SOFI · UPST<br>
+        <b>Straddle green tickers:</b> UPST · PLTR · MARA · COIN · RIOT<br><br>
         <b>Always close on time</b> — day 10 for calls, day 5 for straddles. No exceptions.<br><br>
         <b>The app never touches your money</b> — it only tells you when. You place the trade yourself.<br><br>
         <b>-100% means the option expired worthless</b> — you lost the premium only, not your whole account. Premium = roughly 5% of stock price per share.
@@ -1624,7 +1623,7 @@ async function loadTickerStats(){
       <span style="color:#86efac">●</span> trade = 45%+ win rate &nbsp;·&nbsp;
       <span style="color:#fcd34d">●</span> caution = 30–45% &nbsp;·&nbsp;
       <span style="color:#fca5a5">●</span> skip = below 30%<br>
-      Call+hedge: RIOT · HOOD · SOFI · UPST · PLTR &nbsp;·&nbsp; Straddle: UPST · PLTR · RIOT · COIN · HOOD · AFRM · MARA · DKNG
+      Call+hedge: RIOT · HOOD · SOFI · UPST &nbsp;·&nbsp; Straddle: UPST · PLTR · MARA · COIN · RIOT
     </div>`;
 }
 
