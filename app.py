@@ -26,9 +26,9 @@ SIGNALS_FILE   = DATA_DIR / "signals.json"
 TRADES_FILE    = DATA_DIR / "trades.json"
 BACKTEST_FILE  = DATA_DIR / "backtest.json"
 
-TICKERS          = ["RIOT", "HOOD", "SOFI", "UPST"]        # call+hedge — all 4 green 50%+
-STRADDLE_TICKERS = ["UPST", "MARA", "COIN", "RIOT"]        # straddle — 50%+ win rate only
-# REMOVED from straddle: HOOD (43% -avg), SOFI (40% -avg), AFRM (33%), TSLA (0%), NVDA (0%)
+TICKERS          = ["RIOT", "HOOD", "SOFI", "UPST",                         # green — proven 50%+
+                    "DKNG", "NIO", "CHWY", "PLTR", "SNAP", "ROKU", "MARA"]  # testing call+hedge
+STRADDLE_TICKERS = ["UPST", "MARA", "COIN", "RIOT"]                         # straddle — 50%+ win rate only
 ACCOUNT_SIZE  = 2_000
 RISK_PCT      = 0.03   # 3% risk per trade (realistic — between 1-5%)
 MA_WINDOWS     = [20, 50]
@@ -1590,7 +1590,7 @@ async function loadTickerStats(){
       <span style="color:#86efac">●</span> trade = 45%+ win rate &nbsp;·&nbsp;
       <span style="color:#fcd34d">●</span> caution = 30–45% &nbsp;·&nbsp;
       <span style="color:#fca5a5">●</span> skip = below 30%<br>
-      TSLA + NVDA removed from straddles — market prices in their earnings moves (0% win rate)
+      Call+hedge tickers: RIOT · HOOD · SOFI · UPST &nbsp;·&nbsp; Straddle tickers: UPST · MARA · COIN · RIOT
     </div>`;
 }
 
