@@ -26,12 +26,9 @@ SIGNALS_FILE   = DATA_DIR / "signals.json"
 TRADES_FILE    = DATA_DIR / "trades.json"
 BACKTEST_FILE  = DATA_DIR / "backtest.json"
 
-SMALL_TICKERS = ["RIOT", "HOOD", "SOFI", "UPST"]   # green tickers only — 50%+ win rate
-BIG_TICKERS   = ["RIOT", "HOOD", "SOFI", "UPST"]   # same for big account
-
-SMALL_ACCOUNT  = 2_000
-BIG_ACCOUNT    = 20_000
-RISK_PCT       = 0.03   # 3% risk per trade (realistic — between 1-5%)
+TICKERS       = ["RIOT", "HOOD", "SOFI", "UPST"]   # green tickers — 50%+ win rate
+ACCOUNT_SIZE  = 2_000
+RISK_PCT      = 0.03   # 3% risk per trade (realistic — between 1-5%)
 MA_WINDOWS     = [20, 50]
 HOLD_DAYS      = 10
 CALL_COST_PCT  = 0.05
@@ -141,7 +138,7 @@ def calc_rsi(close, period=14):
 
 # ── SIGNAL GENERATORS ─────────────────────────────────────────────────────────
 
-def call_hedge_signal(ticker, account_size, df=None, as_of_date=None):
+def call_hedge_signal(ticker, df=None, as_of_date=None):
     try:
         if df is None:
             df = get_prices(ticker)
@@ -163,8 +160,7 @@ def call_hedge_signal(ticker, account_size, df=None, as_of_date=None):
         # ── Filter 1: minimum price ──────────────────────────────────────────
         if price < MIN_PRICE:
             return {"ticker": ticker, "strategy": "CALL+HEDGE", "is_buy": False,
-                    "price": round(price, 2), "detail": f"Price ${price:.2f} below minimum ${MIN_PRICE}",
-                    "account": "small" if account_size == SMALL_ACCOUNT else "big"}
+                    "price": round(price, 2), "detail": f"Price ${price:.2f} below minimum ${MIN_PRICE}"}
 
         # ── Filter 2: RSI ─────────────────────────────────────────────────────
         rsi_series = calc_rsi(close)
@@ -172,8 +168,7 @@ def call_hedge_signal(ticker, account_size, df=None, as_of_date=None):
         if not (MIN_RSI <= rsi <= MAX_RSI):
             return {"ticker": ticker, "strategy": "CALL+HEDGE", "is_buy": False,
                     "price": round(price, 2),
-                    "detail": f"RSI {rsi:.0f} outside range {MIN_RSI}–{MAX_RSI}",
-                    "account": "small" if account_size == SMALL_ACCOUNT else "big"}
+                    "detail": f"RSI {rsi:.0f} outside range {MIN_RSI}–{MAX_RSI}"}
 
         # ── Filter 3: volume confirmation ─────────────────────────────────────
         vol_today  = float(volume.iloc[-1])
@@ -182,18 +177,17 @@ def call_hedge_signal(ticker, account_size, df=None, as_of_date=None):
         if vol_ratio < MIN_VOL_RATIO:
             return {"ticker": ticker, "strategy": "CALL+HEDGE", "is_buy": False,
                     "price": round(price, 2),
-                    "detail": f"Volume too low ({vol_ratio:.1f}x avg, need {MIN_VOL_RATIO}x)",
-                    "account": "small" if account_size == SMALL_ACCOUNT else "big"}
+                    "detail": f"Volume too low ({vol_ratio:.1f}x avg, need {MIN_VOL_RATIO}x)"}
 
         # ── Filter 4: not in a downtrend over 20 days ─────────────────────────
+        momentum_20d = 0.0
         if len(close) >= 21:
             price_20d_ago = float(close.iloc[-21])
             momentum_20d  = (price - price_20d_ago) / price_20d_ago
-            if momentum_20d < -0.15:   # stock down more than 15% in 20 days = downtrend, skip
+            if momentum_20d < -0.15:
                 return {"ticker": ticker, "strategy": "CALL+HEDGE", "is_buy": False,
                         "price": round(price, 2),
-                        "detail": f"20d trend {momentum_20d*100:.1f}% — stock in downtrend",
-                        "account": "small" if account_size == SMALL_ACCOUNT else "big"}
+                        "detail": f"20d trend {momentum_20d*100:.1f}% — stock in downtrend"}
 
         for w in MA_WINDOWS:
             ma_col = f"MA_{w}"
@@ -220,7 +214,6 @@ def call_hedge_signal(ticker, account_size, df=None, as_of_date=None):
             lookback     = close.iloc[-10:]
             recent_high  = float(lookback.max())
             pullback_pct = (recent_high - price) / recent_high
-
             if pullback_pct < MIN_PULLBACK_PCT:
                 continue
             if pullback_pct > MAX_PULLBACK_PCT:
@@ -231,10 +224,10 @@ def call_hedge_signal(ticker, account_size, df=None, as_of_date=None):
                 continue
             prev_close = float(close.iloc[-2])
             if prev_close < price:
-                continue  # stock was lower yesterday = already bouncing, missed entry
+                continue
 
             # ── All filters passed ────────────────────────────────────────────
-            risk_budget       = account_size * RISK_PCT
+            risk_budget       = ACCOUNT_SIZE * RISK_PCT
             cost_per_contract = CALL_COST_PCT * price * 100
             max_contracts     = int(risk_budget // cost_per_contract) if cost_per_contract > 0 else 0
 
@@ -246,17 +239,14 @@ def call_hedge_signal(ticker, account_size, df=None, as_of_date=None):
                 "max_contracts": max_contracts, "risk_budget": round(risk_budget, 2),
                 "rsi": round(rsi, 1), "pullback_pct": round(pullback_pct * 100, 1),
                 "vol_ratio": round(vol_ratio, 1),
-                "momentum_20d": round(momentum_20d * 100, 1) if len(close) >= 21 else None,
+                "momentum_20d": round(momentum_20d * 100, 1),
                 "detail": (f"MA{w} uptrend · {pullback_pct*100:.1f}% pullback · "
                            f"RSI {rsi:.0f} · vol {vol_ratio:.1f}x · "
-                           f"20d momentum {momentum_20d*100:.1f}%" if len(close) >= 21
-                           else f"MA{w} uptrend · {pullback_pct*100:.1f}% pullback · RSI {rsi:.0f}"),
-                "account": "small" if account_size == SMALL_ACCOUNT else "big",
+                           f"20d {momentum_20d*100:.1f}%"),
             }
 
         return {"ticker": ticker, "strategy": "CALL+HEDGE", "is_buy": False,
-                "price": round(price, 2), "detail": "No signal — filters not met",
-                "account": "small" if account_size == SMALL_ACCOUNT else "big"}
+                "price": round(price, 2), "detail": "No signal — filters not met"}
 
     except Exception as e:
         log.warning(f"call_hedge_signal {ticker}: {e}")
@@ -312,18 +302,16 @@ def straddle_signal(ticker, df=None, as_of_date=None, next_earnings=None):
             next_earnings = get_next_earnings(ticker)
         if next_earnings is None:
             return {"ticker": ticker, "strategy": "STRADDLE", "is_buy": False,
-                    "price": round(price, 2), "detail": "No upcoming earnings date",
-                    "account": "big"}
+                    "price": round(price, 2), "detail": "No upcoming earnings date"}
 
         ref_date = as_of_date if as_of_date else date.today()
         delta    = (next_earnings - ref_date).days
         if not (EARNINGS_MIN <= delta <= EARNINGS_MAX):
             return {"ticker": ticker, "strategy": "STRADDLE", "is_buy": False,
                     "price": round(price, 2),
-                    "detail": f"Earnings in {delta}d (need {EARNINGS_MIN}–{EARNINGS_MAX}d)",
-                    "account": "big"}
+                    "detail": f"Earnings in {delta}d (need {EARNINGS_MIN}–{EARNINGS_MAX}d)"}
 
-        risk_budget       = BIG_ACCOUNT * RISK_PCT
+        risk_budget       = ACCOUNT_SIZE * RISK_PCT
         cost_per_contract = STRAD_COST_PCT * price * 100
         max_contracts     = int(risk_budget // cost_per_contract) if cost_per_contract > 0 else 0
 
@@ -335,7 +323,6 @@ def straddle_signal(ticker, df=None, as_of_date=None, next_earnings=None):
             "rsi": round(rsi, 1), "vol_range_pct": round(pct_range * 100, 1),
             "detail": (f"Earnings in {delta}d · 10d range {pct_range*100:.1f}% · "
                        f"RSI {rsi:.0f} · hold 5d"),
-            "account": "big",
         }
     except Exception as e:
         log.warning(f"straddle_signal {ticker}: {e}")
@@ -432,47 +419,34 @@ def run_backtest_engine(months=12):
     # Fetch enough history for MA calculations (need 60+ days before start)
     fetch_start = (start_date - timedelta(days=120)).strftime("%Y-%m-%d")
     price_cache = {}
-    all_tickers = list(set(SMALL_TICKERS + BIG_TICKERS))
+    all_tickers = list(set(TICKERS))
     for i, ticker in enumerate(all_tickers):
         backtest_status["progress"] = f"Downloading {ticker} ({i+1}/{len(all_tickers)})…"
         df = get_prices(ticker, start=fetch_start)
         if df is not None:
             price_cache[ticker] = add_ma(df, MA_WINDOWS)
 
-    earnings_cache = {t: get_next_earnings(t) for t in BIG_TICKERS}
+    earnings_cache = {t: get_next_earnings(t) for t in TICKERS}
 
     trades = []
     for day_i, sim_date in enumerate(days):
         backtest_status["progress"] = f"Simulating {sim_date} ({day_i+1}/{len(days)})…"
+        day_buys  = []
+        seen_today = set()
 
-        day_buys = []
-        seen_today = set()  # deduplicate: one signal per ticker per day
-
-        for ticker in SMALL_TICKERS:
+        for ticker in TICKERS:
             if ticker not in price_cache: continue
-            sig = call_hedge_signal(ticker, SMALL_ACCOUNT,
-                                    df=price_cache[ticker], as_of_date=sim_date)
+            sig = call_hedge_signal(ticker, df=price_cache[ticker], as_of_date=sim_date)
             if sig and sig.get("is_buy") and ticker not in seen_today:
                 sig["date"] = str(sim_date)
                 day_buys.append(sig)
                 seen_today.add(ticker)
-
-        for ticker in BIG_TICKERS:
-            if ticker not in price_cache: continue
             strad = straddle_signal(ticker, df=price_cache[ticker],
                                     as_of_date=sim_date,
                                     next_earnings=earnings_cache.get(ticker))
             if strad and strad.get("is_buy"):
                 strad["date"] = str(sim_date)
-                day_buys.append(strad)  # straddles are always unique (different strategy)
-
-            if ticker not in seen_today:
-                call = call_hedge_signal(ticker, BIG_ACCOUNT,
-                                         df=price_cache[ticker], as_of_date=sim_date)
-                if call and call.get("is_buy"):
-                    call["date"] = str(sim_date)
-                    day_buys.append(call)
-                    seen_today.add(ticker)
+                day_buys.append(strad)
 
         for sig in day_buys:
             ticker = sig["ticker"]
@@ -498,29 +472,29 @@ def run_backtest_engine(months=12):
 
     sorted_trades = sorted(trades, key=lambda t: t.get("exit_date",""))
 
-    # Realistic account simulation:
-    # - Start with $2,000
-    # - Risk 20% of account per trade ($400 initially)
-    # - Only ONE trade active at a time (most conservative realistic assumption)
-    # - Each signal that fires: risk 20% of current balance, apply that trade's return
-    # - Same-day exits: average their returns (you could only be in one)
+    # Realistic simulation:
+    # - $2,000 starting balance
+    # - 3% risk per trade
+    # - ONE trade per exit day maximum (you can only be in one at a time realistically)
+    # - If multiple signals exit same day, use the median return (not best, not worst)
     START_BALANCE = 2_000.0
     balance = START_BALANCE
     pnl_series = []
 
     from itertools import groupby
     for exit_date, group in groupby(sorted_trades, key=lambda t: t.get("exit_date","")):
-        day_trades = list(group)
-        # Average the returns for same-day exits (pick one trade per day realistically)
-        avg_day_ret = sum(t.get("return_pct",0) for t in day_trades) / len(day_trades) / 100.0
+        day_trades  = list(group)
+        day_returns = sorted([t.get("return_pct",0) for t in day_trades])
+        # Use median return for the day — realistic single-trade outcome
+        mid         = len(day_returns) // 2
+        day_ret     = day_returns[mid] / 100.0
         risk_amt    = balance * RISK_PCT
-        dollar_pnl  = avg_day_ret * risk_amt
-        balance     = max(balance + dollar_pnl, 1.0)
+        balance     = max(balance + (day_ret * risk_amt), 1.0)
         pnl_series.append({
             "date":    exit_date,
             "balance": round(balance, 2),
-            "ticker":  day_trades[0]["ticker"],
-            "ret":     round(avg_day_ret * 100, 1),
+            "ticker":  day_trades[mid if mid < len(day_trades) else 0]["ticker"],
+            "ret":     round(day_ret * 100, 1),
         })
 
     result = {
@@ -566,26 +540,17 @@ def run_pipeline():
         new_signals = []
         seen_live   = set()
 
-        for ticker in SMALL_TICKERS:
-            sig = call_hedge_signal(ticker, SMALL_ACCOUNT)
+        for ticker in TICKERS:
+            sig = call_hedge_signal(ticker)
             if sig:
                 sig["date"] = today_str
                 new_signals.append(sig)
                 if sig.get("is_buy"):
                     seen_live.add(ticker)
-
-        for ticker in BIG_TICKERS:
             strad = straddle_signal(ticker)
             if strad:
                 strad["date"] = today_str
                 new_signals.append(strad)
-            if ticker not in seen_live:
-                call = call_hedge_signal(ticker, BIG_ACCOUNT)
-                if call:
-                    call["date"] = today_str
-                    new_signals.append(call)
-                    if call.get("is_buy"):
-                        seen_live.add(ticker)
 
         all_signals = [s for s in load_json(SIGNALS_FILE,[]) if s.get("date")!=today_str]
         all_signals.extend(new_signals)
@@ -1051,7 +1016,6 @@ async function loadSignals(ds){
         <div class="ctop">
           <span class="cticker">${s.ticker}</span>
           <span class="tag ${s.strategy==='STRADDLE'?'ts':'tc'}">${s.strategy}</span>
-          <span class="tag ${s.account==='small'?'tsm':'tbig'}">${s.account}</span>
           ${s.is_buy?'<span class="tag tbuy">BUY</span>':''}
         </div>
         <div class="cdet">${s.detail||''}</div>
@@ -1195,7 +1159,6 @@ async function loadBTResults(){
       <div class="tleft">
         <div class="tticker">${t.ticker}
           <span class="tag ${t.strategy==='STRADDLE'?'ts':'tc'}" style="font-size:9px">${t.strategy}</span>
-          <span class="tag ${t.account==='small'?'tsm':'tbig'}" style="font-size:9px">${t.account}</span>
         </div>
         <div class="tmeta">${t.entry_date} → ${t.exit_date||'?'} · $${parseFloat(t.entry_price).toFixed(2)} → $${parseFloat(t.exit_price||t.entry_price).toFixed(2)}</div>
       </div>
