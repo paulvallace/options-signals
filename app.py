@@ -1,8 +1,8 @@
-"""
+“””
 Options Signal Web App
 Flask app that runs your options pipeline and displays results.
 Deploy to Railway for free phone-accessible dashboard.
-"""
+“””
 
 import os
 import json
@@ -19,30 +19,31 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
 
-DATA_DIR = Path(os.environ.get("DATA_DIR", "./data"))
+DATA_DIR = Path(os.environ.get(“DATA_DIR”, “./data”))
 DATA_DIR.mkdir(exist_ok=True)
 
-SIGNALS_FILE   = DATA_DIR / "signals.json"
-TRADES_FILE    = DATA_DIR / "trades.json"
-BACKTEST_FILE  = DATA_DIR / "backtest.json"
+SIGNALS_FILE   = DATA_DIR / “signals.json”
+TRADES_FILE    = DATA_DIR / “trades.json”
+BACKTEST_FILE  = DATA_DIR / “backtest.json”
 
-TICKERS          = ["RIOT", "HOOD", "SOFI", "UPST"]               # call+hedge — 50%+ win rate
-STRADDLE_TICKERS = ["UPST", "PLTR", "MARA", "COIN", "RIOT"]      # straddle — 50%+ win rate
+TICKERS          = [“RIOT”, “HOOD”, “SOFI”, “UPST”]               # call+hedge — 50%+ win rate
+STRADDLE_TICKERS = [“UPST”, “PLTR”, “MARA”, “COIN”, “RIOT”]      # straddle — 50%+ win rate
 ACCOUNT_SIZE  = 2_000
 RISK_PCT      = 0.03   # 3% risk per trade (realistic — between 1-5%)
-MA_WINDOWS     = [20, 50]
+MA_WINDOWS     = [21, 50]   # EMA windows — 21 EMA is medium-term trend (Bulltard method)
 HOLD_DAYS      = 10
 CALL_COST_PCT  = 0.05
 PUT_COST_PCT   = 0.02
 STRAD_COST_PCT = 0.08
 EARNINGS_MIN   = 3
 EARNINGS_MAX   = 7
-START_DATE     = "2020-01-01"
+START_DATE     = “2020-01-01”
 
 # ── SIGNAL FILTERS ────────────────────────────────────────────────────────────
+
 MIN_PRICE        = 6.0    # skip sub-$6 tickers (wide spreads, poor liquidity)
 MIN_PULLBACK_PCT = 0.02   # pullback from recent high at least 2%
-MAX_PULLBACK_PCT = 0.15   # not more than 15% — that's a breakdown
+MAX_PULLBACK_PCT = 0.15   # not more than 15% — that’s a breakdown
 MIN_RSI          = 33     # not in freefall
 MAX_RSI          = 74     # not overbought
 MIN_VOL_RATIO    = 0.5    # volume at least 50% of 20d avg
@@ -50,912 +51,1054 @@ MA_SLOPE_DAYS    = 5      # MA must be rising over last N days
 MIN_ABOVE_MA_PCT = 0.01   # price at least 1% above MA
 MIN_MOMENTUM_PCT = 0.0    # removed momentum floor — MA slope handles this already
 
-app = Flask(__name__)
+app = Flask(**name**)
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger(__name__)
+log = logging.getLogger(**name**)
 
 pipeline_lock   = threading.Lock()
 backtest_lock   = threading.Lock()
-pipeline_status = {"running": False, "last_run": None, "last_result": "Never run"}
-backtest_status = {"running": False, "progress": "", "done": False}
+pipeline_status = {“running”: False, “last_run”: None, “last_result”: “Never run”}
+backtest_status = {“running”: False, “progress”: “”, “done”: False}
 
 # ── PERSISTENCE ───────────────────────────────────────────────────────────────
 
 def load_json(path, default):
-    try:
-        if path.exists():
-            return json.loads(path.read_text())
-    except Exception:
-        pass
-    return default
+try:
+if path.exists():
+return json.loads(path.read_text())
+except Exception:
+pass
+return default
 
 def save_json(path, data):
-    path.write_text(json.dumps(data, default=str, indent=2))
+path.write_text(json.dumps(data, default=str, indent=2))
 
 # ── DATA HELPERS ──────────────────────────────────────────────────────────────
 
 def _ensure_series(s):
-    if isinstance(s, pd.DataFrame):
-        return s.iloc[:, 0]
-    return s.squeeze()
+if isinstance(s, pd.DataFrame):
+return s.iloc[:, 0]
+return s.squeeze()
 
 def get_prices(ticker, start=START_DATE):
-    df = yf.download(ticker, start=start, auto_adjust=False,
-                     group_by="column", progress=False)
-    if df.empty:
-        return None
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    df = df[["Open", "High", "Low", "Close", "Volume"]].dropna().astype(float)
-    return df
+df = yf.download(ticker, start=start, auto_adjust=False,
+group_by=“column”, progress=False)
+if df.empty:
+return None
+if isinstance(df.columns, pd.MultiIndex):
+df.columns = df.columns.get_level_values(0)
+df = df[[“Open”, “High”, “Low”, “Close”, “Volume”]].dropna().astype(float)
+return df
 
 def get_current_price(ticker):
-    try:
-        tk = yf.Ticker(ticker)
-        hist = tk.history(period="1d")
-        if not hist.empty:
-            return float(hist["Close"].iloc[-1])
-    except Exception:
-        pass
-    return None
+try:
+tk = yf.Ticker(ticker)
+hist = tk.history(period=“1d”)
+if not hist.empty:
+return float(hist[“Close”].iloc[-1])
+except Exception:
+pass
+return None
 
 def get_next_earnings(ticker):
-    try:
-        tk = yf.Ticker(ticker)
-        ed = tk.get_earnings_dates(limit=8)
-        if ed is None or len(ed) == 0:
-            return None
-        idx = ed.index
-        today_ts = pd.Timestamp.today().normalize()
-        future = idx[idx >= today_ts]
-        if len(future) == 0:
-            return None
-        return future[0].date()
-    except Exception:
-        return None
+try:
+tk = yf.Ticker(ticker)
+ed = tk.get_earnings_dates(limit=8)
+if ed is None or len(ed) == 0:
+return None
+idx = ed.index
+today_ts = pd.Timestamp.today().normalize()
+future = idx[idx >= today_ts]
+if len(future) == 0:
+return None
+return future[0].date()
+except Exception:
+return None
 
 def add_ma(df, windows):
-    df = df.copy()
-    close = _ensure_series(df["Close"]).astype(float)
-    for w in windows:
-        df[f"MA_{w}"] = close.rolling(w).mean()
-    return df
+“”“Add Exponential Moving Averages. EMA weights recent prices more heavily
+than SMA, making it faster to react to trend changes (21 EMA = Bulltard method).”””
+df = df.copy()
+close = *ensure_series(df[“Close”]).astype(float)
+for w in windows:
+df[f”MA*{w}”] = close.ewm(span=w, adjust=False).mean()  # EMA not SMA
+return df
 
 def trading_days_in_range(start_date, end_date):
-    days, cur = [], start_date
-    while cur <= end_date:
-        if cur.weekday() < 5:
-            days.append(cur)
-        cur += timedelta(days=1)
-    return days
+days, cur = [], start_date
+while cur <= end_date:
+if cur.weekday() < 5:
+days.append(cur)
+cur += timedelta(days=1)
+return days
 
 # ── HISTORICAL EARNINGS DATES ─────────────────────────────────────────────────
+
 # Hardcoded so the backtest can correctly simulate straddle entries.
+
 # yfinance only returns FUTURE earnings dates, not historical ones.
-# Format: "TICKER": [date, date, ...] — actual report dates
+
+# Format: “TICKER”: [date, date, …] — actual report dates
+
 HISTORICAL_EARNINGS = {
-    "RIOT": [
-        date(2022, 5, 16), date(2022, 8, 15), date(2022, 11, 14), date(2023, 2, 27),
-        date(2023, 5, 15), date(2023, 8, 14), date(2023, 11, 13), date(2024, 2, 26),
-        date(2024, 5,  8), date(2024, 8,  7), date(2024, 11,  6), date(2025, 2, 24),
-        date(2025, 5,  7), date(2025, 8,  6), date(2025, 10, 29), date(2026, 3,  2),
-    ],
-    "UPST": [
-        date(2022, 2, 15), date(2022, 5,  9), date(2022, 8,  8), date(2022, 11,  8),
-        date(2023, 2, 14), date(2023, 5,  9), date(2023, 8,  8), date(2023, 11,  7),
-        date(2024, 5,  7), date(2024, 8,  6), date(2024, 11,  7), date(2025, 2, 11),
-        date(2025, 5,  6), date(2025, 8,  5), date(2025, 11,  4), date(2026, 2, 10),
-    ],
-    "COIN": [
-        date(2022, 5, 10), date(2022, 8,  9), date(2022, 11,  3), date(2023, 2, 21),
-        date(2023, 5,  4), date(2023, 8,  3), date(2023, 11,  2), date(2024, 2, 15),
-        date(2024, 5,  2), date(2024, 8,  1), date(2024, 10, 30), date(2025, 2, 13),
-        date(2025, 5,  8), date(2025, 8,  7), date(2025, 11,  6), date(2026, 2, 12),
-    ],
-    "MARA": [
-        date(2022, 5,  4), date(2022, 8,  8), date(2022, 11,  8), date(2023, 2, 28),
-        date(2023, 5,  9), date(2023, 8,  8), date(2023, 11,  8), date(2024, 2, 28),
-        date(2024, 5,  8), date(2024, 8,  7), date(2024, 11,  5), date(2025, 2, 25),
-        date(2025, 5,  8), date(2025, 7, 29), date(2025, 11,  4), date(2026, 3,  4),
-    ],
-    "HOOD": [
-        date(2022, 5, 26), date(2022, 8,  2), date(2022, 11,  2), date(2023, 2,  8),
-        date(2023, 5, 10), date(2023, 8,  2), date(2023, 11,  1), date(2024, 2, 13),
-        date(2024, 5,  8), date(2024, 8,  7), date(2024, 10, 30), date(2025, 2, 12),
-        date(2025, 4, 30), date(2025, 8,  6), date(2025, 11,  5), date(2026, 2, 10),
-    ],
-    "SOFI": [
-        date(2022, 5,  9), date(2022, 8,  1), date(2022, 10, 31), date(2023, 1, 30),
-        date(2023, 4, 24), date(2023, 7, 31), date(2023, 10, 30), date(2024, 1, 29),
-        date(2024, 4, 29), date(2024, 7, 30), date(2024, 10, 29), date(2025, 1, 27),
-        date(2025, 4, 28), date(2025, 7, 29), date(2025, 10, 28), date(2026, 1, 30),
-    ],
-    "AFRM": [
-        date(2022, 5, 12), date(2022, 8, 25), date(2022, 11,  3), date(2023, 2,  9),
-        date(2023, 5, 11), date(2023, 8, 24), date(2023, 11,  9), date(2024, 2,  8),
-        date(2024, 5,  9), date(2024, 8,  8), date(2024, 11,  7), date(2025, 2,  6),
-        date(2025, 5, 14), date(2025, 8,  7), date(2025, 11,  6), date(2026, 2,  5),
-    ],
-    "DKNG": [
-        date(2022, 5,  6), date(2022, 8,  5), date(2022, 11,  4), date(2023, 2, 24),
-        date(2023, 5,  5), date(2023, 8,  4), date(2023, 11,  3), date(2024, 2, 15),
-        date(2024, 5,  2), date(2024, 8,  1), date(2024, 11,  7), date(2025, 2, 14),
-        date(2025, 5,  1), date(2025, 8,  1), date(2025, 11,  7), date(2026, 2, 13),
-    ],
-    "SNAP": [
-        date(2022, 4, 21), date(2022, 7, 21), date(2022, 10, 20), date(2023, 1, 31),
-        date(2023, 4, 27), date(2023, 7, 25), date(2023, 10, 24), date(2024, 1, 30),
-        date(2024, 4, 25), date(2024, 7, 23), date(2024, 10, 29), date(2025, 2,  4),
-        date(2025, 4, 24), date(2025, 7, 29), date(2025, 11,  5), date(2026, 2,  4),
-    ],
-    "PLTR": [
-        date(2022, 5,  9), date(2022, 8,  8), date(2022, 11,  7), date(2023, 2, 13),
-        date(2023, 5,  8), date(2023, 8,  7), date(2023, 11,  3), date(2024, 2,  5),
-        date(2024, 5,  6), date(2024, 8,  5), date(2024, 11,  4), date(2025, 2,  3),
-        date(2025, 5,  5), date(2025, 8,  4), date(2025, 11,  3), date(2026, 2,  3),
-    ],
-    "TSLA": [
-        date(2022, 4, 20), date(2022, 7, 20), date(2022, 10, 19), date(2023, 1, 25),
-        date(2023, 4, 19), date(2023, 7, 19), date(2023, 10, 18), date(2024, 1, 24),
-        date(2024, 4, 23), date(2024, 7, 23), date(2024, 10, 23), date(2025, 1, 29),
-        date(2025, 4, 22), date(2025, 7, 22), date(2025, 10, 22), date(2026, 4, 22),
-    ],
-    "NVDA": [
-        date(2022, 5, 25), date(2022, 8, 24), date(2022, 11, 16), date(2023, 2, 22),
-        date(2023, 5, 24), date(2023, 8, 23), date(2023, 11, 21), date(2024, 2, 21),
-        date(2024, 5, 22), date(2024, 8, 28), date(2024, 11, 20), date(2025, 2, 26),
-        date(2025, 5, 28), date(2025, 8, 27), date(2025, 11, 19), date(2026, 2, 26),
-    ],
+“RIOT”: [
+date(2022, 5, 16), date(2022, 8, 15), date(2022, 11, 14), date(2023, 2, 27),
+date(2023, 5, 15), date(2023, 8, 14), date(2023, 11, 13), date(2024, 2, 26),
+date(2024, 5,  8), date(2024, 8,  7), date(2024, 11,  6), date(2025, 2, 24),
+date(2025, 5,  7), date(2025, 8,  6), date(2025, 10, 29), date(2026, 3,  2),
+],
+“UPST”: [
+date(2022, 2, 15), date(2022, 5,  9), date(2022, 8,  8), date(2022, 11,  8),
+date(2023, 2, 14), date(2023, 5,  9), date(2023, 8,  8), date(2023, 11,  7),
+date(2024, 5,  7), date(2024, 8,  6), date(2024, 11,  7), date(2025, 2, 11),
+date(2025, 5,  6), date(2025, 8,  5), date(2025, 11,  4), date(2026, 2, 10),
+],
+“COIN”: [
+date(2022, 5, 10), date(2022, 8,  9), date(2022, 11,  3), date(2023, 2, 21),
+date(2023, 5,  4), date(2023, 8,  3), date(2023, 11,  2), date(2024, 2, 15),
+date(2024, 5,  2), date(2024, 8,  1), date(2024, 10, 30), date(2025, 2, 13),
+date(2025, 5,  8), date(2025, 8,  7), date(2025, 11,  6), date(2026, 2, 12),
+],
+“MARA”: [
+date(2022, 5,  4), date(2022, 8,  8), date(2022, 11,  8), date(2023, 2, 28),
+date(2023, 5,  9), date(2023, 8,  8), date(2023, 11,  8), date(2024, 2, 28),
+date(2024, 5,  8), date(2024, 8,  7), date(2024, 11,  5), date(2025, 2, 25),
+date(2025, 5,  8), date(2025, 7, 29), date(2025, 11,  4), date(2026, 3,  4),
+],
+“HOOD”: [
+date(2022, 5, 26), date(2022, 8,  2), date(2022, 11,  2), date(2023, 2,  8),
+date(2023, 5, 10), date(2023, 8,  2), date(2023, 11,  1), date(2024, 2, 13),
+date(2024, 5,  8), date(2024, 8,  7), date(2024, 10, 30), date(2025, 2, 12),
+date(2025, 4, 30), date(2025, 8,  6), date(2025, 11,  5), date(2026, 2, 10),
+],
+“SOFI”: [
+date(2022, 5,  9), date(2022, 8,  1), date(2022, 10, 31), date(2023, 1, 30),
+date(2023, 4, 24), date(2023, 7, 31), date(2023, 10, 30), date(2024, 1, 29),
+date(2024, 4, 29), date(2024, 7, 30), date(2024, 10, 29), date(2025, 1, 27),
+date(2025, 4, 28), date(2025, 7, 29), date(2025, 10, 28), date(2026, 1, 30),
+],
+“AFRM”: [
+date(2022, 5, 12), date(2022, 8, 25), date(2022, 11,  3), date(2023, 2,  9),
+date(2023, 5, 11), date(2023, 8, 24), date(2023, 11,  9), date(2024, 2,  8),
+date(2024, 5,  9), date(2024, 8,  8), date(2024, 11,  7), date(2025, 2,  6),
+date(2025, 5, 14), date(2025, 8,  7), date(2025, 11,  6), date(2026, 2,  5),
+],
+“DKNG”: [
+date(2022, 5,  6), date(2022, 8,  5), date(2022, 11,  4), date(2023, 2, 24),
+date(2023, 5,  5), date(2023, 8,  4), date(2023, 11,  3), date(2024, 2, 15),
+date(2024, 5,  2), date(2024, 8,  1), date(2024, 11,  7), date(2025, 2, 14),
+date(2025, 5,  1), date(2025, 8,  1), date(2025, 11,  7), date(2026, 2, 13),
+],
+“SNAP”: [
+date(2022, 4, 21), date(2022, 7, 21), date(2022, 10, 20), date(2023, 1, 31),
+date(2023, 4, 27), date(2023, 7, 25), date(2023, 10, 24), date(2024, 1, 30),
+date(2024, 4, 25), date(2024, 7, 23), date(2024, 10, 29), date(2025, 2,  4),
+date(2025, 4, 24), date(2025, 7, 29), date(2025, 11,  5), date(2026, 2,  4),
+],
+“PLTR”: [
+date(2022, 5,  9), date(2022, 8,  8), date(2022, 11,  7), date(2023, 2, 13),
+date(2023, 5,  8), date(2023, 8,  7), date(2023, 11,  3), date(2024, 2,  5),
+date(2024, 5,  6), date(2024, 8,  5), date(2024, 11,  4), date(2025, 2,  3),
+date(2025, 5,  5), date(2025, 8,  4), date(2025, 11,  3), date(2026, 2,  3),
+],
+“TSLA”: [
+date(2022, 4, 20), date(2022, 7, 20), date(2022, 10, 19), date(2023, 1, 25),
+date(2023, 4, 19), date(2023, 7, 19), date(2023, 10, 18), date(2024, 1, 24),
+date(2024, 4, 23), date(2024, 7, 23), date(2024, 10, 23), date(2025, 1, 29),
+date(2025, 4, 22), date(2025, 7, 22), date(2025, 10, 22), date(2026, 4, 22),
+],
+“NVDA”: [
+date(2022, 5, 25), date(2022, 8, 24), date(2022, 11, 16), date(2023, 2, 22),
+date(2023, 5, 24), date(2023, 8, 23), date(2023, 11, 21), date(2024, 2, 21),
+date(2024, 5, 22), date(2024, 8, 28), date(2024, 11, 20), date(2025, 2, 26),
+date(2025, 5, 28), date(2025, 8, 27), date(2025, 11, 19), date(2026, 2, 26),
+],
 }
 
 def get_next_earnings_for_date(ticker, as_of_date):
-    """
-    Return the next earnings date for a ticker as of a given historical date.
-    Uses hardcoded historical dates so the backtest works correctly.
-    Falls back to live yfinance data for future/unknown dates.
-    """
-    dates = HISTORICAL_EARNINGS.get(ticker, [])
-    future = [d for d in dates if d > as_of_date]
-    if future:
-        return min(future)
-    # Fall back to live data for dates beyond our hardcoded history
-    return get_next_earnings(ticker)
+“””
+Return the next earnings date for a ticker as of a given historical date.
+Uses hardcoded historical dates so the backtest works correctly.
+Falls back to live yfinance data for future/unknown dates.
+“””
+dates = HISTORICAL_EARNINGS.get(ticker, [])
+future = [d for d in dates if d > as_of_date]
+if future:
+return min(future)
+# Fall back to live data for dates beyond our hardcoded history
+return get_next_earnings(ticker)
 
 def calc_rsi(close, period=14):
-    """Wilder RSI on a price series."""
-    delta = close.diff()
-    gain  = delta.clip(lower=0).rolling(period).mean()
-    loss  = (-delta.clip(upper=0)).rolling(period).mean()
-    rs    = gain / loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
+“”“Wilder RSI on a price series.”””
+delta = close.diff()
+gain  = delta.clip(lower=0).rolling(period).mean()
+loss  = (-delta.clip(upper=0)).rolling(period).mean()
+rs    = gain / loss.replace(0, np.nan)
+return 100 - (100 / (1 + rs))
 
 # ── SIGNAL GENERATORS ─────────────────────────────────────────────────────────
 
 def call_hedge_signal(ticker, df=None, as_of_date=None):
-    try:
-        if df is None:
-            df = get_prices(ticker)
-        if df is None or len(df) < 60:
+try:
+if df is None:
+df = get_prices(ticker)
+if df is None or len(df) < 60:
+return None
+df = add_ma(df, MA_WINDOWS)
+
+```
+    if as_of_date is not None:
+        df_slice = df[df.index <= pd.Timestamp(as_of_date)]
+        if len(df_slice) < 60:
             return None
-        df = add_ma(df, MA_WINDOWS)
+    else:
+        df_slice = df
 
-        if as_of_date is not None:
-            df_slice = df[df.index <= pd.Timestamp(as_of_date)]
-            if len(df_slice) < 60:
-                return None
-        else:
-            df_slice = df
+    close  = _ensure_series(df_slice["Close"]).astype(float)
+    volume = _ensure_series(df_slice["Volume"]).astype(float)
+    price  = float(close.iloc[-1])
 
-        close  = _ensure_series(df_slice["Close"]).astype(float)
-        volume = _ensure_series(df_slice["Volume"]).astype(float)
-        price  = float(close.iloc[-1])
+    # ── Filter 1: minimum price ──────────────────────────────────────────
+    if price < MIN_PRICE:
+        return {"ticker": ticker, "strategy": "CALL+HEDGE", "is_buy": False,
+                "price": round(price, 2), "detail": f"Price ${price:.2f} below minimum ${MIN_PRICE}"}
 
-        # ── Filter 1: minimum price ──────────────────────────────────────────
-        if price < MIN_PRICE:
-            return {"ticker": ticker, "strategy": "CALL+HEDGE", "is_buy": False,
-                    "price": round(price, 2), "detail": f"Price ${price:.2f} below minimum ${MIN_PRICE}"}
+    # ── Filter 1b: block if earnings within 7 days (IV crush risk) ────────
+    ref_date      = as_of_date if as_of_date else date.today()
+    next_earnings = get_next_earnings_for_date(ticker, ref_date)
+    if next_earnings is None:
+        next_earnings = get_next_earnings(ticker)
+    days_to_earn  = (next_earnings - ref_date).days if next_earnings else 999
+    if days_to_earn <= 7:
+        return {"ticker": ticker, "strategy": "CALL+HEDGE", "is_buy": False,
+                "price": round(price, 2),
+                "detail": f"⚠️ Earnings in {days_to_earn}d — no call buys near earnings (IV crush risk)",
+                "earnings_date": str(next_earnings),
+                "days_to_earnings": days_to_earn}
 
-        # ── Filter 2: RSI ─────────────────────────────────────────────────────
-        rsi_series = calc_rsi(close)
-        rsi = float(rsi_series.iloc[-1]) if not pd.isna(rsi_series.iloc[-1]) else 50
-        if not (MIN_RSI <= rsi <= MAX_RSI):
-            return {"ticker": ticker, "strategy": "CALL+HEDGE", "is_buy": False,
-                    "price": round(price, 2),
-                    "detail": f"RSI {rsi:.0f} outside range {MIN_RSI}–{MAX_RSI}"}
-
-        # ── Filter 3: volume confirmation ─────────────────────────────────────
-        vol_today  = float(volume.iloc[-1])
-        vol_20avg  = float(volume.iloc[-21:-1].mean()) if len(volume) >= 21 else vol_today
-        vol_ratio  = vol_today / vol_20avg if vol_20avg > 0 else 1.0
-        if vol_ratio < MIN_VOL_RATIO:
-            return {"ticker": ticker, "strategy": "CALL+HEDGE", "is_buy": False,
-                    "price": round(price, 2),
-                    "detail": f"Volume too low ({vol_ratio:.1f}x avg, need {MIN_VOL_RATIO}x)"}
-
-        # ── Filter 4: not in a downtrend over 20 days ─────────────────────────
-        momentum_20d = 0.0
-        if len(close) >= 21:
-            price_20d_ago = float(close.iloc[-21])
-            momentum_20d  = (price - price_20d_ago) / price_20d_ago
-            if momentum_20d < -0.15:
+    # ── Filter 1c: SPY market regime — no BUY if S&P below its 21 EMA ──────
+    # Based on James Bulltard: "nobody was ever caught in a selloff by
+    # selling when the market broke below key moving averages"
+    # Only check in live mode (as_of_date=None) — backtest uses price_cache
+    if as_of_date is None:
+        try:
+            spy_df = yf.download("SPY", period="60d", auto_adjust=False, progress=False)
+            if isinstance(spy_df.columns, pd.MultiIndex):
+                spy_df.columns = spy_df.columns.get_level_values(0)
+            spy_close  = _ensure_series(spy_df["Close"]).astype(float)
+            spy_ema21  = float(spy_close.ewm(span=21, adjust=False).mean().iloc[-1])
+            spy_price  = float(spy_close.iloc[-1])
+            if spy_price < spy_ema21:
                 return {"ticker": ticker, "strategy": "CALL+HEDGE", "is_buy": False,
                         "price": round(price, 2),
-                        "detail": f"20d trend {momentum_20d*100:.1f}% — stock in downtrend"}
-
-        for w in MA_WINDOWS:
-            ma_col = f"MA_{w}"
-            if ma_col not in df_slice.columns:
-                continue
-            ma_series = _ensure_series(df_slice[ma_col]).astype(float)
-            ma_today  = float(ma_series.iloc[-1])
-            if pd.isna(ma_today):
-                continue
-
-            # ── Filter 5: price meaningfully above MA ─────────────────────────
-            above_pct = (price - ma_today) / ma_today
-            if above_pct < MIN_ABOVE_MA_PCT:
-                continue
-
-            # ── Filter 6: MA slope is rising ──────────────────────────────────
-            if len(ma_series.dropna()) < MA_SLOPE_DAYS + 1:
-                continue
-            ma_prev = float(ma_series.dropna().iloc[-(MA_SLOPE_DAYS + 1)])
-            if ma_today <= ma_prev:
-                continue
-
-            # ── Filter 7: meaningful pullback from recent high ────────────────
-            lookback     = close.iloc[-10:]
-            recent_high  = float(lookback.max())
-            pullback_pct = (recent_high - price) / recent_high
-            if pullback_pct < MIN_PULLBACK_PCT:
-                continue
-            if pullback_pct > MAX_PULLBACK_PCT:
-                continue
-
-            # ── Filter 8: previous day must be down (confirming active dip) ───
-            if len(close) < 3:
-                continue
-            prev_close = float(close.iloc[-2])
-            if prev_close < price:
-                continue
-
-            # ── All filters passed ────────────────────────────────────────────
-            risk_budget       = ACCOUNT_SIZE * RISK_PCT
-            cost_per_contract = CALL_COST_PCT * price * 100
-            max_contracts     = int(risk_budget // cost_per_contract) if cost_per_contract > 0 else 0
-
-            return {
-                "ticker": ticker, "strategy": "CALL+HEDGE", "is_buy": True,
-                "price": round(price, 2), "ma_window": w,
-                "hold_days": HOLD_DAYS,
-                "call_cost_pct": CALL_COST_PCT, "put_cost_pct": PUT_COST_PCT,
-                "max_contracts": max_contracts, "risk_budget": round(risk_budget, 2),
-                "rsi": round(rsi, 1), "pullback_pct": round(pullback_pct * 100, 1),
-                "vol_ratio": round(vol_ratio, 1),
-                "momentum_20d": round(momentum_20d * 100, 1),
-                "detail": (f"MA{w} uptrend · {pullback_pct*100:.1f}% pullback · "
-                           f"RSI {rsi:.0f} · vol {vol_ratio:.1f}x · "
-                           f"20d {momentum_20d*100:.1f}%"),
-            }
-
+                        "detail": f"🚫 Market below SPY 21 EMA (${spy_ema21:.2f}) — no calls in downtrend"}
+        except Exception as spy_err:
+            log.warning(f"SPY check failed: {spy_err}")  # fail open — don't block signal
+    rsi_series = calc_rsi(close)
+    rsi = float(rsi_series.iloc[-1]) if not pd.isna(rsi_series.iloc[-1]) else 50
+    if not (MIN_RSI <= rsi <= MAX_RSI):
         return {"ticker": ticker, "strategy": "CALL+HEDGE", "is_buy": False,
-                "price": round(price, 2), "detail": "No signal — filters not met"}
+                "price": round(price, 2),
+                "detail": f"RSI {rsi:.0f} outside range {MIN_RSI}–{MAX_RSI}"}
 
-    except Exception as e:
-        log.warning(f"call_hedge_signal {ticker}: {e}")
-        return None
+    # ── Filter 3: volume confirmation ─────────────────────────────────────
+    vol_today  = float(volume.iloc[-1])
+    vol_20avg  = float(volume.iloc[-21:-1].mean()) if len(volume) >= 21 else vol_today
+    vol_ratio  = vol_today / vol_20avg if vol_20avg > 0 else 1.0
+    if vol_ratio < MIN_VOL_RATIO:
+        return {"ticker": ticker, "strategy": "CALL+HEDGE", "is_buy": False,
+                "price": round(price, 2),
+                "detail": f"Volume too low ({vol_ratio:.1f}x avg, need {MIN_VOL_RATIO}x)"}
 
-def straddle_signal(ticker, df=None, as_of_date=None, next_earnings=None):
-    try:
-        if df is None:
-            df = get_prices(ticker)
-        if df is None or len(df) < 20:
-            return None
-
-        if as_of_date is not None:
-            close = _ensure_series(df["Close"]).astype(float)
-            close = close[close.index <= pd.Timestamp(as_of_date)]
-            if len(close) < 20:
-                return None
-        else:
-            close = _ensure_series(df["Close"]).astype(float)
-
-        price = float(close.iloc[-1])
-
-        # Min price filter
-        if price < MIN_PRICE:
-            return {"ticker": ticker, "strategy": "STRADDLE", "is_buy": False,
-                    "price": round(price, 2), "detail": f"Price below ${MIN_PRICE} minimum",
-                    "account": "big"}
-
-        # Volatility sweet spot: need SOME vol for a straddle to pay off,
-        # but not so much that premium is already priced in
-        recent    = close.iloc[-10:]
-        pct_range = (recent.max() - recent.min()) / recent.iloc[-1]
-        if pct_range < 0.03:
-            return {"ticker": ticker, "strategy": "STRADDLE", "is_buy": False,
-                    "price": round(price, 2), "detail": "Too quiet — not enough volatility for a straddle",
-                    "account": "big"}
-        if pct_range > 0.15:
-            return {"ticker": ticker, "strategy": "STRADDLE", "is_buy": False,
-                    "price": round(price, 2), "detail": "Too volatile — premium already expensive",
-                    "account": "big"}
-
-        # RSI filter — avoid entering into extreme moves
-        rsi_series = calc_rsi(close)
-        rsi = float(rsi_series.iloc[-1]) if not pd.isna(rsi_series.iloc[-1]) else 50
-        if rsi < 30 or rsi > 75:
-            return {"ticker": ticker, "strategy": "STRADDLE", "is_buy": False,
+    # ── Filter 4: not in a downtrend over 20 days ─────────────────────────
+    momentum_20d = 0.0
+    if len(close) >= 21:
+        price_20d_ago = float(close.iloc[-21])
+        momentum_20d  = (price - price_20d_ago) / price_20d_ago
+        if momentum_20d < -0.15:
+            return {"ticker": ticker, "strategy": "CALL+HEDGE", "is_buy": False,
                     "price": round(price, 2),
-                    "detail": f"RSI {rsi:.0f} extreme — wait for calm before earnings",
-                    "account": "big"}
+                    "detail": f"20d trend {momentum_20d*100:.1f}% — stock in downtrend"}
 
-        # Earnings filter — use historical dates in backtest, live data for today
-        if next_earnings is None:
-            if as_of_date is not None:
-                next_earnings = get_next_earnings_for_date(ticker, as_of_date)
-            else:
-                next_earnings = get_next_earnings(ticker)
-        if next_earnings is None:
-            return {"ticker": ticker, "strategy": "STRADDLE", "is_buy": False,
-                    "price": round(price, 2), "detail": "No upcoming earnings date"}
+    for w in MA_WINDOWS:
+        ma_col = f"MA_{w}"
+        if ma_col not in df_slice.columns:
+            continue
+        ma_series = _ensure_series(df_slice[ma_col]).astype(float)
+        ma_today  = float(ma_series.iloc[-1])
+        if pd.isna(ma_today):
+            continue
 
-        ref_date = as_of_date if as_of_date else date.today()
-        delta    = (next_earnings - ref_date).days
-        if not (EARNINGS_MIN <= delta <= EARNINGS_MAX):
-            return {"ticker": ticker, "strategy": "STRADDLE", "is_buy": False,
-                    "price": round(price, 2),
-                    "detail": f"Earnings in {delta}d (need {EARNINGS_MIN}–{EARNINGS_MAX}d)"}
+        # ── Filter 5: price meaningfully above MA ─────────────────────────
+        above_pct = (price - ma_today) / ma_today
+        if above_pct < MIN_ABOVE_MA_PCT:
+            continue
 
+        # ── Filter 6: MA slope is rising ──────────────────────────────────
+        if len(ma_series.dropna()) < MA_SLOPE_DAYS + 1:
+            continue
+        ma_prev = float(ma_series.dropna().iloc[-(MA_SLOPE_DAYS + 1)])
+        if ma_today <= ma_prev:
+            continue
+
+        # ── Filter 7: meaningful pullback from recent high ────────────────
+        lookback     = close.iloc[-10:]
+        recent_high  = float(lookback.max())
+        pullback_pct = (recent_high - price) / recent_high
+        if pullback_pct < MIN_PULLBACK_PCT:
+            continue
+        if pullback_pct > MAX_PULLBACK_PCT:
+            continue
+
+        # ── Filter 8: previous day must be down (confirming active dip) ───
+        if len(close) < 3:
+            continue
+        prev_close = float(close.iloc[-2])
+        if prev_close < price:
+            continue
+
+        # ── All filters passed ────────────────────────────────────────────
         risk_budget       = ACCOUNT_SIZE * RISK_PCT
-        cost_per_contract = STRAD_COST_PCT * price * 100
+        cost_per_contract = CALL_COST_PCT * price * 100
         max_contracts     = int(risk_budget // cost_per_contract) if cost_per_contract > 0 else 0
 
         return {
-            "ticker": ticker, "strategy": "STRADDLE", "is_buy": True,
-            "price": round(price, 2), "hold_days": 5, "strad_cost_pct": STRAD_COST_PCT,
-            "earnings_date": str(next_earnings), "days_to_earnings": delta,
+            "ticker": ticker, "strategy": "CALL+HEDGE", "is_buy": True,
+            "price": round(price, 2), "ma_window": w,
+            "hold_days": HOLD_DAYS,
+            "call_cost_pct": CALL_COST_PCT, "put_cost_pct": PUT_COST_PCT,
             "max_contracts": max_contracts, "risk_budget": round(risk_budget, 2),
-            "rsi": round(rsi, 1), "vol_range_pct": round(pct_range * 100, 1),
-            "detail": (f"Earnings in {delta}d · 10d range {pct_range*100:.1f}% · "
-                       f"RSI {rsi:.0f} · hold 5d"),
+            "rsi": round(rsi, 1), "pullback_pct": round(pullback_pct * 100, 1),
+            "vol_ratio": round(vol_ratio, 1),
+            "momentum_20d": round(momentum_20d * 100, 1),
+            "detail": (f"MA{w} uptrend · {pullback_pct*100:.1f}% pullback · "
+                       f"RSI {rsi:.0f} · vol {vol_ratio:.1f}x · "
+                       f"20d {momentum_20d*100:.1f}%"),
         }
-    except Exception as e:
-        log.warning(f"straddle_signal {ticker}: {e}")
-        return None
+
+    return {"ticker": ticker, "strategy": "CALL+HEDGE", "is_buy": False,
+            "price": round(price, 2), "detail": "No signal — filters not met"}
+
+except Exception as e:
+    log.warning(f"call_hedge_signal {ticker}: {e}")
+    return None
+```
+
+def straddle_signal(ticker, df=None, as_of_date=None, next_earnings=None):
+try:
+if df is None:
+df = get_prices(ticker)
+if df is None or len(df) < 20:
+return None
+
+```
+    if as_of_date is not None:
+        close = _ensure_series(df["Close"]).astype(float)
+        close = close[close.index <= pd.Timestamp(as_of_date)]
+        if len(close) < 20:
+            return None
+    else:
+        close = _ensure_series(df["Close"]).astype(float)
+
+    price = float(close.iloc[-1])
+
+    # Min price filter
+    if price < MIN_PRICE:
+        return {"ticker": ticker, "strategy": "STRADDLE", "is_buy": False,
+                "price": round(price, 2), "detail": f"Price below ${MIN_PRICE} minimum",
+                "account": "big"}
+
+    # Volatility sweet spot: need SOME vol for a straddle to pay off,
+    # but not so much that premium is already priced in
+    recent    = close.iloc[-10:]
+    pct_range = (recent.max() - recent.min()) / recent.iloc[-1]
+    if pct_range < 0.03:
+        return {"ticker": ticker, "strategy": "STRADDLE", "is_buy": False,
+                "price": round(price, 2), "detail": "Too quiet — not enough volatility for a straddle",
+                "account": "big"}
+    if pct_range > 0.15:
+        return {"ticker": ticker, "strategy": "STRADDLE", "is_buy": False,
+                "price": round(price, 2), "detail": "Too volatile — premium already expensive",
+                "account": "big"}
+
+    # RSI filter — avoid entering into extreme moves
+    rsi_series = calc_rsi(close)
+    rsi = float(rsi_series.iloc[-1]) if not pd.isna(rsi_series.iloc[-1]) else 50
+    if rsi < 30 or rsi > 75:
+        return {"ticker": ticker, "strategy": "STRADDLE", "is_buy": False,
+                "price": round(price, 2),
+                "detail": f"RSI {rsi:.0f} extreme — wait for calm before earnings",
+                "account": "big"}
+
+    # Earnings filter — use historical dates in backtest, live data for today
+    if next_earnings is None:
+        if as_of_date is not None:
+            next_earnings = get_next_earnings_for_date(ticker, as_of_date)
+        else:
+            next_earnings = get_next_earnings(ticker)
+    if next_earnings is None:
+        return {"ticker": ticker, "strategy": "STRADDLE", "is_buy": False,
+                "price": round(price, 2), "detail": "No upcoming earnings date"}
+
+    ref_date = as_of_date if as_of_date else date.today()
+    delta    = (next_earnings - ref_date).days
+    if not (EARNINGS_MIN <= delta <= EARNINGS_MAX):
+        return {"ticker": ticker, "strategy": "STRADDLE", "is_buy": False,
+                "price": round(price, 2),
+                "detail": f"Earnings in {delta}d (need {EARNINGS_MIN}–{EARNINGS_MAX}d)"}
+
+    risk_budget       = ACCOUNT_SIZE * RISK_PCT
+    cost_per_contract = STRAD_COST_PCT * price * 100
+    max_contracts     = int(risk_budget // cost_per_contract) if cost_per_contract > 0 else 0
+
+    return {
+        "ticker": ticker, "strategy": "STRADDLE", "is_buy": True,
+        "price": round(price, 2), "hold_days": 5, "strad_cost_pct": STRAD_COST_PCT,
+        "earnings_date": str(next_earnings), "days_to_earnings": delta,
+        "max_contracts": max_contracts, "risk_budget": round(risk_budget, 2),
+        "rsi": round(rsi, 1), "vol_range_pct": round(pct_range * 100, 1),
+        "detail": (f"Earnings in {delta}d · 10d range {pct_range*100:.1f}% · "
+                   f"RSI {rsi:.0f} · hold 5d"),
+    }
+except Exception as e:
+    log.warning(f"straddle_signal {ticker}: {e}")
+    return None
+```
 
 # ── TRADE SIMULATION ──────────────────────────────────────────────────────────
 
 def simulate_trade_return(trade, price_df):
-    try:
-        close    = _ensure_series(price_df["Close"]).astype(float)
-        entry_ts = pd.Timestamp(trade["entry_date"])
-        hold     = trade.get("hold_days", HOLD_DAYS)
+try:
+close    = _ensure_series(price_df[“Close”]).astype(float)
+entry_ts = pd.Timestamp(trade[“entry_date”])
+hold     = trade.get(“hold_days”, HOLD_DAYS)
 
-        locs = [i for i, d in enumerate(close.index) if d >= entry_ts]
-        if not locs:
-            return None
-        entry_loc = locs[0]
+```
+    locs = [i for i, d in enumerate(close.index) if d >= entry_ts]
+    if not locs:
+        return None
+    entry_loc = locs[0]
 
-        # Skip if we don't have enough future data for the full hold period
-        # A trade entered too close to the end of available data is incomplete
-        if entry_loc + hold > len(close) - 1:
-            return None  # not enough data — skip this trade entirely
-
-        exit_loc = entry_loc + hold
-        ep = float(close.iloc[entry_loc])
-        xp = float(close.iloc[exit_loc])
-
-        if trade["strategy"] == "STRADDLE":
-            cost   = trade.get("strad_cost_pct", STRAD_COST_PCT) * ep
-            payoff = abs(xp - ep)
-        else:
-            call_cost   = trade.get("call_cost_pct", CALL_COST_PCT) * ep
-            call_payoff = max(0.0, xp - ep)
-            window      = close.iloc[entry_loc:exit_loc + 1]
-            max_gain    = max(0.0, float(window.max()) - ep)
-            hedged      = (max_gain / call_cost >= 0.20) if call_cost > 0 else False
-            if hedged:
-                put_cost   = trade.get("put_cost_pct", PUT_COST_PCT) * ep
-                put_payoff = max(0.0, ep - xp)
-                cost       = call_cost + put_cost
-                payoff     = call_payoff + put_payoff
-            else:
-                cost, payoff = call_cost, call_payoff
-
-        ret = max((payoff - cost) / cost, -1.0) if cost else 0
-        return {
-            "exit_date":  str(close.index[exit_loc].date()),
-            "exit_price": round(xp, 2),
-            "return_pct": round(ret * 100, 2),
-        }
-    except Exception as e:
-        log.warning(f"simulate_trade_return: {e}")
+    if entry_loc + hold > len(close) - 1:
         return None
 
+    # For call+hedge: check if earnings fall within the hold window
+    # If so, exit 1 day before earnings to avoid IV crush
+    exit_loc = entry_loc + hold
+    if trade.get("strategy") == "CALL+HEDGE":
+        ticker      = trade["ticker"]
+        entry_date  = trade["entry_date"]
+        entry_d     = date.fromisoformat(entry_date)
+        next_earn   = get_next_earnings_for_date(ticker, entry_d)
+        if next_earn:
+            # Find the trading day 1 day before earnings
+            earn_ts = pd.Timestamp(next_earn)
+            for i in range(entry_loc + 1, exit_loc + 1):
+                if close.index[i] >= earn_ts:
+                    # Exit at the last trading day before earnings
+                    exit_loc = max(entry_loc + 1, i - 1)
+                    break
+    ep = float(close.iloc[entry_loc])
+    xp = float(close.iloc[exit_loc])
+    days_held = exit_loc - entry_loc  # actual trading days held
+
+    if trade["strategy"] == "STRADDLE":
+        # Straddle: buy ATM call + put
+        # Cost = strad_cost_pct * entry price (8% default = IV proxy)
+        cost   = trade.get("strad_cost_pct", STRAD_COST_PCT) * ep
+        # Payoff = intrinsic value of winning side at exit
+        move   = abs(xp - ep)
+        # Apply time decay: options lose ~30% of extrinsic value in first half,
+        # ~70% in second half. Simplified linear decay on extrinsic.
+        # At exit, option is worth intrinsic + remaining extrinsic
+        remaining_days = max(0, 5 - days_held)  # 5-day hold for straddles
+        extrinsic_remaining = cost * 0.3 * (remaining_days / 5.0)
+        payoff = max(move, 0) + extrinsic_remaining
+    else:
+        # Call + Hedge: buy slightly OTM call
+        # Strike = 2% above entry (realistic slightly OTM)
+        strike = ep * 1.02
+        call_cost = trade.get("call_cost_pct", CALL_COST_PCT) * ep
+
+        # Intrinsic value at exit
+        intrinsic = max(0.0, xp - strike)
+
+        # Time value remaining at exit (simplified)
+        # Options lose time value as expiry approaches — roughly 1/3 in first half
+        remaining_days = max(0, hold - days_held)
+        # IV proxy: use 30-day price range as annualized vol estimate
+        window_prices  = close.iloc[max(0, entry_loc-20):entry_loc+1]
+        hist_vol       = float(window_prices.pct_change().std()) * np.sqrt(252) if len(window_prices) > 5 else 0.6
+        hist_vol       = min(max(hist_vol, 0.3), 2.0)  # clip between 30% and 200%
+        # Simplified time value: vol * sqrt(remaining/252) * stock_price * 0.4
+        time_value     = hist_vol * np.sqrt(remaining_days / 252.0) * ep * 0.4
+        time_value     = min(time_value, call_cost * 0.5)  # cap at 50% of original cost
+
+        option_value   = intrinsic + time_value
+
+        # Check if hedge triggered (call up 20%+ at any point)
+        window      = close.iloc[entry_loc:exit_loc + 1]
+        max_price   = float(window.max())
+        max_intrinsic = max(0.0, max_price - strike)
+        max_option_val = max_intrinsic + call_cost * 0.3  # rough peak value
+        hedged = (max_option_val / call_cost - 1.0 >= 0.20) if call_cost > 0 else False
+
+        if hedged:
+            put_cost    = trade.get("put_cost_pct", PUT_COST_PCT) * ep
+            put_strike  = ep * 0.98   # put slightly below entry
+            put_intrinsic = max(0.0, put_strike - xp)
+            put_time_val  = hist_vol * np.sqrt(remaining_days / 252.0) * ep * 0.2
+            put_time_val  = min(put_time_val, put_cost * 0.5)
+            put_value   = put_intrinsic + put_time_val
+            cost        = call_cost + put_cost
+            payoff      = option_value + put_value
+        else:
+            cost   = call_cost
+            payoff = option_value
+
+    ret = max((payoff - cost) / cost, -1.0) if cost else 0
+    return {
+        "exit_date":  str(close.index[exit_loc].date()),
+        "exit_price": round(xp, 2),
+        "return_pct": round(ret * 100, 2),
+    }
+except Exception as e:
+    log.warning(f"simulate_trade_return: {e}")
+    return None
+```
+
 def trading_days_elapsed(entry_date_str, today=None):
-    """Count actual trading days (weekdays) between entry and today."""
-    entry = date.fromisoformat(entry_date_str)
-    end   = today or date.today()
-    count, cur = 0, entry + timedelta(days=1)
-    while cur <= end:
-        if cur.weekday() < 5:
-            count += 1
-        cur += timedelta(days=1)
-    return count
+“”“Count actual trading days (weekdays) between entry and today.”””
+entry = date.fromisoformat(entry_date_str)
+end   = today or date.today()
+count, cur = 0, entry + timedelta(days=1)
+while cur <= end:
+if cur.weekday() < 5:
+count += 1
+cur += timedelta(days=1)
+return count
 
 def close_expired_trades(trades):
-    today_str   = str(date.today())
-    open_trades, closed = [], []
-    for t in trades:
-        if t.get("status") != "open":
-            closed.append(t); continue
-        held = trading_days_elapsed(t["entry_date"])
-        if held < t.get("hold_days", HOLD_DAYS):
-            open_trades.append(t); continue
-        ep         = t["entry_price"]
-        exit_price = get_current_price(t["ticker"]) or ep
-        if t["strategy"] == "STRADDLE":
-            cost   = t.get("strad_cost_pct", STRAD_COST_PCT) * ep
-            payoff = abs(exit_price - ep)
-        else:
-            cost   = t.get("call_cost_pct", CALL_COST_PCT) * ep
-            payoff = max(0, exit_price - ep)
-        ret = max((payoff - cost) / cost, -1.0) if cost else 0
-        t.update({"status":"closed","exit_date":today_str,
-                  "exit_price":round(exit_price,2),"return_pct":round(ret*100,2)})
-        closed.append(t)
-    return open_trades + closed
+today_str   = str(date.today())
+open_trades, closed = [], []
+for t in trades:
+if t.get(“status”) != “open”:
+closed.append(t); continue
+held = trading_days_elapsed(t[“entry_date”])
+if held < t.get(“hold_days”, HOLD_DAYS):
+open_trades.append(t); continue
+ep         = t[“entry_price”]
+exit_price = get_current_price(t[“ticker”]) or ep
+held       = trading_days_elapsed(t[“entry_date”])
+hold       = t.get(“hold_days”, HOLD_DAYS)
+
+```
+    if t["strategy"] == "STRADDLE":
+        cost   = t.get("strad_cost_pct", STRAD_COST_PCT) * ep
+        move   = abs(exit_price - ep)
+        remaining_days = max(0, hold - held)
+        extrinsic = cost * 0.3 * (remaining_days / hold) if hold else 0
+        payoff = move + extrinsic
+    else:
+        strike    = ep * 1.02   # 2% OTM call
+        call_cost = t.get("call_cost_pct", CALL_COST_PCT) * ep
+        intrinsic = max(0.0, exit_price - strike)
+        remaining_days = max(0, hold - held)
+        time_val  = min(call_cost * 0.4 * (remaining_days / hold) if hold else 0,
+                        call_cost * 0.5)
+        payoff    = intrinsic + time_val
+        cost      = call_cost
+
+    ret = max((payoff - cost) / cost, -1.0) if cost else 0
+    t.update({"status":"closed","exit_date":today_str,
+              "exit_price":round(exit_price,2),"return_pct":round(ret*100,2)})
+    closed.append(t)
+return open_trades + closed
+```
 
 # ── BACKTEST ENGINE ───────────────────────────────────────────────────────────
 
 def run_backtest_engine(months=12):
-    end_date   = date.today() - timedelta(days=1)
-    start_date = end_date - timedelta(days=months * 31)
-    days       = trading_days_in_range(start_date, end_date)
+end_date   = date.today() - timedelta(days=1)
+start_date = end_date - timedelta(days=months * 31)
+days       = trading_days_in_range(start_date, end_date)
 
-    log.info(f"Backtest: {start_date} → {end_date} ({len(days)} trading days, {months} months)")
-    backtest_status["progress"] = f"Downloading price data for {months}-month backtest…"
+```
+log.info(f"Backtest: {start_date} → {end_date} ({len(days)} trading days, {months} months)")
+backtest_status["progress"] = f"Downloading price data for {months}-month backtest…"
 
-    # Fetch enough history for MA calculations (need 60+ days before start)
-    # Use 180 days buffer to handle 50-day MA warmup on long backtests
-    fetch_start = (start_date - timedelta(days=180)).strftime("%Y-%m-%d")
-    price_cache = {}
-    all_tickers = list(set(TICKERS + STRADDLE_TICKERS))
-    for i, ticker in enumerate(all_tickers):
-        backtest_status["progress"] = f"Downloading {ticker} ({i+1}/{len(all_tickers)})…"
-        df = get_prices(ticker, start=fetch_start)
-        if df is not None:
-            price_cache[ticker] = add_ma(df, MA_WINDOWS)
+# Fetch enough history for MA calculations (need 60+ days before start)
+# Use 180 days buffer to handle 50-day MA warmup on long backtests
+fetch_start = (start_date - timedelta(days=180)).strftime("%Y-%m-%d")
+price_cache = {}
+all_tickers = list(set(TICKERS + STRADDLE_TICKERS))
+for i, ticker in enumerate(all_tickers):
+    backtest_status["progress"] = f"Downloading {ticker} ({i+1}/{len(all_tickers)})…"
+    df = get_prices(ticker, start=fetch_start)
+    if df is not None:
+        price_cache[ticker] = add_ma(df, MA_WINDOWS)
 
-    trades = []
-    for day_i, sim_date in enumerate(days):
-        backtest_status["progress"] = f"Simulating {sim_date} ({day_i+1}/{len(days)})…"
-        day_buys  = []
-        seen_today = set()
+trades = []
+for day_i, sim_date in enumerate(days):
+    backtest_status["progress"] = f"Simulating {sim_date} ({day_i+1}/{len(days)})…"
+    day_buys  = []
+    seen_today = set()
 
-        for ticker in TICKERS:
-            if ticker not in price_cache: continue
-            sig = call_hedge_signal(ticker, df=price_cache[ticker], as_of_date=sim_date)
-            if sig and sig.get("is_buy") and ticker not in seen_today:
-                sig["date"] = str(sim_date)
-                day_buys.append(sig)
-                seen_today.add(ticker)
+    for ticker in TICKERS:
+        if ticker not in price_cache: continue
+        sig = call_hedge_signal(ticker, df=price_cache[ticker], as_of_date=sim_date)
+        if sig and sig.get("is_buy") and ticker not in seen_today:
+            sig["date"] = str(sim_date)
+            day_buys.append(sig)
+            seen_today.add(ticker)
 
-        for ticker in STRADDLE_TICKERS:
-            if ticker not in price_cache: continue
-            strad = straddle_signal(ticker, df=price_cache[ticker], as_of_date=sim_date)
-            if strad and strad.get("is_buy"):
-                strad["date"] = str(sim_date)
-                day_buys.append(strad)
+    for ticker in STRADDLE_TICKERS:
+        if ticker not in price_cache: continue
+        strad = straddle_signal(ticker, df=price_cache[ticker], as_of_date=sim_date)
+        if strad and strad.get("is_buy"):
+            strad["date"] = str(sim_date)
+            day_buys.append(strad)
 
-        for sig in day_buys:
-            ticker = sig["ticker"]
-            if ticker not in price_cache: continue
-            trade = {
-                "ticker": ticker, "strategy": sig["strategy"],
-                "entry_date": str(sim_date), "entry_price": sig["price"],
-                "hold_days": sig.get("hold_days", HOLD_DAYS),
-                "call_cost_pct": sig.get("call_cost_pct", CALL_COST_PCT),
-                "put_cost_pct": sig.get("put_cost_pct", PUT_COST_PCT),
-                "strad_cost_pct": sig.get("strad_cost_pct", STRAD_COST_PCT),
-                "account": sig.get("account", "big"), "backtest": True,
-            }
-            result = simulate_trade_return(trade, price_cache[ticker])
-            if result:
-                trade.update(result)
-                trade["status"] = "closed"
-                trades.append(trade)
+    for sig in day_buys:
+        ticker = sig["ticker"]
+        if ticker not in price_cache: continue
+        trade = {
+            "ticker": ticker, "strategy": sig["strategy"],
+            "entry_date": str(sim_date), "entry_price": sig["price"],
+            "hold_days": sig.get("hold_days", HOLD_DAYS),
+            "call_cost_pct": sig.get("call_cost_pct", CALL_COST_PCT),
+            "put_cost_pct": sig.get("put_cost_pct", PUT_COST_PCT),
+            "strad_cost_pct": sig.get("strad_cost_pct", STRAD_COST_PCT),
+            "account": sig.get("account", "big"), "backtest": True,
+        }
+        result = simulate_trade_return(trade, price_cache[ticker])
+        if result:
+            trade.update(result)
+            trade["status"] = "closed"
+            trades.append(trade)
 
-    returns  = [t["return_pct"] for t in trades if "return_pct" in t]
-    win_rate = round(len([r for r in returns if r>0])/len(returns)*100,1) if returns else 0
-    avg_ret  = round(sum(returns)/len(returns),2) if returns else 0
+returns  = [t["return_pct"] for t in trades if "return_pct" in t]
+win_rate = round(len([r for r in returns if r>0])/len(returns)*100,1) if returns else 0
+avg_ret  = round(sum(returns)/len(returns),2) if returns else 0
 
-    sorted_trades = sorted(trades, key=lambda t: t.get("exit_date",""))
+sorted_trades = sorted(trades, key=lambda t: t.get("exit_date",""))
 
-    # Realistic simulation:
-    # - $2,000 starting balance
-    # - 3% risk per trade
-    # - ONE trade per exit day maximum (you can only be in one at a time realistically)
-    # - If multiple signals exit same day, use the median return (not best, not worst)
-    START_BALANCE = 2_000.0
-    balance = START_BALANCE
-    pnl_series = []
+# Realistic simulation:
+# - $2,000 starting balance
+# - 3% risk per trade
+# - ONE trade per exit day maximum (you can only be in one at a time realistically)
+# - If multiple signals exit same day, use the median return (not best, not worst)
+START_BALANCE = 2_000.0
+balance = START_BALANCE
+pnl_series = []
 
-    from itertools import groupby
-    for exit_date, group in groupby(sorted_trades, key=lambda t: t.get("exit_date","")):
-        day_trades  = list(group)
-        day_returns = sorted([t.get("return_pct",0) for t in day_trades])
-        # Use median return for the day — realistic single-trade outcome
-        mid         = len(day_returns) // 2
-        day_ret     = day_returns[mid] / 100.0
-        risk_amt    = balance * RISK_PCT
-        balance     = max(balance + (day_ret * risk_amt), 1.0)
-        pnl_series.append({
-            "date":    exit_date,
-            "balance": round(balance, 2),
-            "ticker":  day_trades[mid if mid < len(day_trades) else 0]["ticker"],
-            "ret":     round(day_ret * 100, 1),
-        })
+from itertools import groupby
+for exit_date, group in groupby(sorted_trades, key=lambda t: t.get("exit_date","")):
+    day_trades  = list(group)
+    day_returns = sorted([t.get("return_pct",0) for t in day_trades])
+    # Use median return for the day — realistic single-trade outcome
+    mid         = len(day_returns) // 2
+    day_ret     = day_returns[mid] / 100.0
+    risk_amt    = balance * RISK_PCT
+    balance     = max(balance + (day_ret * risk_amt), 1.0)
+    pnl_series.append({
+        "date":    exit_date,
+        "balance": round(balance, 2),
+        "ticker":  day_trades[mid if mid < len(day_trades) else 0]["ticker"],
+        "ret":     round(day_ret * 100, 1),
+    })
 
-    result = {
-        "period":        f"{start_date} → {end_date}",
-        "trading_days":  len(days),
-        "total_trades":  len(trades),
-        "win_rate":      win_rate,
-        "avg_return":    avg_ret,
-        "best_trade":    round(max(returns),2) if returns else 0,
-        "worst_trade":   round(min(returns),2) if returns else 0,
-        "total_buys":    len(trades),
-        "start_balance": START_BALANCE,
-        "end_balance":   round(balance, 2),
-        "pnl_series":    pnl_series,
-        "trades":        sorted_trades,
-        "generated_at":  str(datetime.now()),
-    }
-    save_json(BACKTEST_FILE, result)
-    return result
+result = {
+    "period":        f"{start_date} → {end_date}",
+    "trading_days":  len(days),
+    "total_trades":  len(trades),
+    "win_rate":      win_rate,
+    "avg_return":    avg_ret,
+    "best_trade":    round(max(returns),2) if returns else 0,
+    "worst_trade":   round(min(returns),2) if returns else 0,
+    "total_buys":    len(trades),
+    "start_balance": START_BALANCE,
+    "end_balance":   round(balance, 2),
+    "pnl_series":    pnl_series,
+    "trades":        sorted_trades,
+    "generated_at":  str(datetime.now()),
+}
+save_json(BACKTEST_FILE, result)
+return result
+```
 
 def run_backtest_thread(months=12):
-    if not backtest_lock.acquire(blocking=False):
-        return
-    backtest_status.update({"running":True,"done":False})
-    try:
-        run_backtest_engine(months=months)
-        backtest_status.update({"done":True,"progress":"Complete ✓"})
-    except Exception as e:
-        log.exception("Backtest error")
-        backtest_status["progress"] = f"Error: {e}"
-    finally:
-        backtest_status["running"] = False
-        backtest_lock.release()
+if not backtest_lock.acquire(blocking=False):
+return
+backtest_status.update({“running”:True,“done”:False})
+try:
+run_backtest_engine(months=months)
+backtest_status.update({“done”:True,“progress”:“Complete ✓”})
+except Exception as e:
+log.exception(“Backtest error”)
+backtest_status[“progress”] = f”Error: {e}”
+finally:
+backtest_status[“running”] = False
+backtest_lock.release()
 
 # ── LIVE PIPELINE ─────────────────────────────────────────────────────────────
 
 def run_pipeline():
-    if not pipeline_lock.acquire(blocking=False):
-        return {"error": "Already running"}
-    pipeline_status["running"] = True
-    today_str = str(date.today())
-    try:
-        new_signals = []
-        seen_live   = set()
+if not pipeline_lock.acquire(blocking=False):
+return {“error”: “Already running”}
+pipeline_status[“running”] = True
+today_str = str(date.today())
+try:
+new_signals = []
+seen_live   = set()
 
-        for ticker in TICKERS:
-            sig = call_hedge_signal(ticker)
-            if sig:
-                sig["date"] = today_str
-                new_signals.append(sig)
-                if sig.get("is_buy"):
-                    seen_live.add(ticker)
+```
+    for ticker in TICKERS:
+        sig = call_hedge_signal(ticker)
+        if sig:
+            sig["date"] = today_str
+            new_signals.append(sig)
+            if sig.get("is_buy"):
+                seen_live.add(ticker)
 
-        for ticker in STRADDLE_TICKERS:
-            strad = straddle_signal(ticker)
-            if strad:
-                strad["date"] = today_str
-                new_signals.append(strad)
+    for ticker in STRADDLE_TICKERS:
+        strad = straddle_signal(ticker)
+        if strad:
+            strad["date"] = today_str
+            new_signals.append(strad)
 
-        all_signals = [s for s in load_json(SIGNALS_FILE,[]) if s.get("date")!=today_str]
-        all_signals.extend(new_signals)
-        save_json(SIGNALS_FILE, all_signals)
+    all_signals = [s for s in load_json(SIGNALS_FILE,[]) if s.get("date")!=today_str]
+    all_signals.extend(new_signals)
+    save_json(SIGNALS_FILE, all_signals)
 
-        trades   = close_expired_trades(load_json(TRADES_FILE,[]))
-        existing = {(t["ticker"],t["strategy"],t["entry_date"]) for t in trades if t.get("status")=="open"}
-        for sig in new_signals:
-            if not sig.get("is_buy"): continue
-            key = (sig["ticker"],sig["strategy"],today_str)
-            if key not in existing:
-                trades.append({
-                    "ticker":sig["ticker"],"strategy":sig["strategy"],
-                    "entry_date":today_str,"entry_price":sig["price"],
-                    "hold_days":sig.get("hold_days",HOLD_DAYS),
-                    "call_cost_pct":sig.get("call_cost_pct",CALL_COST_PCT),
-                    "put_cost_pct":sig.get("put_cost_pct",PUT_COST_PCT),
-                    "strad_cost_pct":sig.get("strad_cost_pct",STRAD_COST_PCT),
-                    "status":"open","account":sig.get("account","big"),
-                })
-        save_json(TRADES_FILE, trades)
+    trades   = close_expired_trades(load_json(TRADES_FILE,[]))
+    existing = {(t["ticker"],t["strategy"],t["entry_date"]) for t in trades if t.get("status")=="open"}
+    for sig in new_signals:
+        if not sig.get("is_buy"): continue
+        key = (sig["ticker"],sig["strategy"],today_str)
+        if key not in existing:
+            trades.append({
+                "ticker":sig["ticker"],"strategy":sig["strategy"],
+                "entry_date":today_str,"entry_price":sig["price"],
+                "hold_days":sig.get("hold_days",HOLD_DAYS),
+                "call_cost_pct":sig.get("call_cost_pct",CALL_COST_PCT),
+                "put_cost_pct":sig.get("put_cost_pct",PUT_COST_PCT),
+                "strad_cost_pct":sig.get("strad_cost_pct",STRAD_COST_PCT),
+                "status":"open","account":sig.get("account","big"),
+            })
+    save_json(TRADES_FILE, trades)
 
-        buy_count = sum(1 for s in new_signals if s.get("is_buy"))
-        result    = f"{len(new_signals)} signals · {buy_count} BUY"
-        pipeline_status.update({"last_run":today_str,"last_result":result})
-        return {"ok":True,"result":result}
-    except Exception as e:
-        log.exception("Pipeline error")
-        pipeline_status["last_result"] = f"Error: {e}"
-        return {"error":str(e)}
-    finally:
-        pipeline_status["running"] = False
-        pipeline_lock.release()
+    buy_count = sum(1 for s in new_signals if s.get("is_buy"))
+    result    = f"{len(new_signals)} signals · {buy_count} BUY"
+    pipeline_status.update({"last_run":today_str,"last_result":result})
+    return {"ok":True,"result":result}
+except Exception as e:
+    log.exception("Pipeline error")
+    pipeline_status["last_result"] = f"Error: {e}"
+    return {"error":str(e)}
+finally:
+    pipeline_status["running"] = False
+    pipeline_lock.release()
+```
 
 # ── SCHEDULER ─────────────────────────────────────────────────────────────────
 
 scheduler = BackgroundScheduler()
-scheduler.add_job(run_pipeline,"cron",day_of_week="mon-fri",hour=9,minute=5)
+scheduler.add_job(run_pipeline,“cron”,day_of_week=“mon-fri”,hour=9,minute=5)
 scheduler.start()
 
 # ── API ───────────────────────────────────────────────────────────────────────
 
-@app.route("/api/run",methods=["POST"])
+@app.route(”/api/earnings-warnings”)
+def api_earnings_warnings():
+“”“Check open call+hedge trades for upcoming earnings within 7 days.”””
+trades     = load_json(TRADES_FILE, [])
+open_calls = [t for t in trades
+if t.get(“status”)==“open” and t.get(“strategy”)==“CALL+HEDGE”]
+warnings = []
+today = date.today()
+for t in open_calls:
+ticker       = t[“ticker”]
+next_earn    = get_next_earnings_for_date(ticker, today)
+if next_earn is None:
+next_earn = get_next_earnings(ticker)
+if next_earn is None:
+continue
+days = (next_earn - today).days
+if 0 <= days <= 7:
+warnings.append({
+“ticker”:          ticker,
+“days_to_earnings”: days,
+“earnings_date”:   str(next_earn),
+})
+return jsonify(warnings)
+
+@app.route(”/api/run”,methods=[“POST”])
 def api_run():
-    if pipeline_status["running"]: return jsonify({"error":"Already running"}),429
-    threading.Thread(target=run_pipeline,daemon=True).start()
-    return jsonify({"ok":True})
+if pipeline_status[“running”]: return jsonify({“error”:“Already running”}),429
+threading.Thread(target=run_pipeline,daemon=True).start()
+return jsonify({“ok”:True})
 
-@app.route("/api/trades/clear",methods=["POST"])
+@app.route(”/api/trades/clear”,methods=[“POST”])
 def api_clear_trades():
-    trades  = load_json(TRADES_FILE,[])
-    closed  = [t for t in trades if t.get("status")!="open"]
-    cleared = len(trades) - len(closed)
-    save_json(TRADES_FILE, closed)
-    return jsonify({"ok":True,"cleared":cleared})
+trades  = load_json(TRADES_FILE,[])
+closed  = [t for t in trades if t.get(“status”)!=“open”]
+cleared = len(trades) - len(closed)
+save_json(TRADES_FILE, closed)
+return jsonify({“ok”:True,“cleared”:cleared})
 
-@app.route("/api/status")
+@app.route(”/api/status”)
 def api_status(): return jsonify(pipeline_status)
 
-@app.route("/api/signals")
+@app.route(”/api/signals”)
 def api_signals():
-    day = request.args.get("date",str(date.today()))
-    return jsonify([s for s in load_json(SIGNALS_FILE,[]) if s.get("date")==day])
+day = request.args.get(“date”,str(date.today()))
+return jsonify([s for s in load_json(SIGNALS_FILE,[]) if s.get(“date”)==day])
 
-@app.route("/api/trades")
+@app.route(”/api/trades”)
 def api_trades(): return jsonify(load_json(TRADES_FILE,[]))
 
-@app.route("/api/summary")
+@app.route(”/api/summary”)
 def api_summary():
-    signals = load_json(SIGNALS_FILE,[])
-    trades  = load_json(TRADES_FILE,[])
-    closed  = [t for t in trades if t.get("status")=="closed"]
-    wins    = [t for t in closed if t.get("return_pct",0)>0]
-    cum, series = 0.0, []
-    for t in sorted(closed,key=lambda x:x.get("exit_date","")):
-        cum += t.get("return_pct",0)
-        series.append({"date":t["exit_date"],"cum":round(cum,2)})
-    return jsonify({
-        "total_signals":len(signals),
-        "total_buys":len([s for s in signals if s.get("is_buy")]),
-        "open_trades":len([t for t in trades if t.get("status")=="open"]),
-        "closed_trades":len(closed),
-        "win_rate":round(len(wins)/len(closed)*100,1) if closed else 0,
-        "avg_return":round(sum(t.get("return_pct",0) for t in closed)/len(closed),2) if closed else 0,
-        "pnl_series":series,**pipeline_status,
-    })
+signals = load_json(SIGNALS_FILE,[])
+trades  = load_json(TRADES_FILE,[])
+closed  = [t for t in trades if t.get(“status”)==“closed”]
+wins    = [t for t in closed if t.get(“return_pct”,0)>0]
+cum, series = 0.0, []
+for t in sorted(closed,key=lambda x:x.get(“exit_date”,””)):
+cum += t.get(“return_pct”,0)
+series.append({“date”:t[“exit_date”],“cum”:round(cum,2)})
+return jsonify({
+“total_signals”:len(signals),
+“total_buys”:len([s for s in signals if s.get(“is_buy”)]),
+“open_trades”:len([t for t in trades if t.get(“status”)==“open”]),
+“closed_trades”:len(closed),
+“win_rate”:round(len(wins)/len(closed)*100,1) if closed else 0,
+“avg_return”:round(sum(t.get(“return_pct”,0) for t in closed)/len(closed),2) if closed else 0,
+“pnl_series”:series,**pipeline_status,
+})
 
-@app.route("/api/backtest/run",methods=["POST"])
+@app.route(”/api/backtest/run”,methods=[“POST”])
 def api_backtest_run():
-    if backtest_status["running"]: return jsonify({"error":"Already running"}),429
-    months = int(request.json.get("months",12)) if request.is_json else 12
-    threading.Thread(target=run_backtest_thread,args=(months,),daemon=True).start()
-    return jsonify({"ok":True})
+if backtest_status[“running”]: return jsonify({“error”:“Already running”}),429
+months = int(request.json.get(“months”,12)) if request.is_json else 12
+threading.Thread(target=run_backtest_thread,args=(months,),daemon=True).start()
+return jsonify({“ok”:True})
 
-@app.route("/api/backtest/status")
+@app.route(”/api/backtest/status”)
 def api_backtest_status(): return jsonify(backtest_status)
 
-@app.route("/api/backtest/results")
+@app.route(”/api/backtest/results”)
 def api_backtest_results():
-    data = load_json(BACKTEST_FILE,None)
-    if data is None: return jsonify({"error":"No results yet"}),404
-    return jsonify(data)
+data = load_json(BACKTEST_FILE,None)
+if data is None: return jsonify({“error”:“No results yet”}),404
+return jsonify(data)
 
-@app.route("/api/ticker-stats")
+@app.route(”/api/ticker-stats”)
 def api_ticker_stats():
-    live_trades = load_json(TRADES_FILE, [])
-    bt_data     = load_json(BACKTEST_FILE, None)
-    bt_trades   = bt_data.get("trades", []) if bt_data else []
-    all_closed  = [t for t in live_trades + bt_trades if t.get("status") == "closed"]
+live_trades = load_json(TRADES_FILE, [])
+bt_data     = load_json(BACKTEST_FILE, None)
+bt_trades   = bt_data.get(“trades”, []) if bt_data else []
+all_closed  = [t for t in live_trades + bt_trades if t.get(“status”) == “closed”]
 
-    # Build stats keyed by (ticker, strategy)
-    stats = {}
-    for t in all_closed:
-        key = (t["ticker"], t.get("strategy","CALL+HEDGE"))
-        if key not in stats:
-            stats[key] = {"ticker": t["ticker"], "strategy": t.get("strategy","CALL+HEDGE"),
-                          "trades": [], "wins": 0}
-        ret = t.get("return_pct", 0)
-        stats[key]["trades"].append(ret)
-        if ret > 0:
-            stats[key]["wins"] += 1
+```
+# Build stats keyed by (ticker, strategy)
+stats = {}
+for t in all_closed:
+    key = (t["ticker"], t.get("strategy","CALL+HEDGE"))
+    if key not in stats:
+        stats[key] = {"ticker": t["ticker"], "strategy": t.get("strategy","CALL+HEDGE"),
+                      "trades": [], "wins": 0}
+    ret = t.get("return_pct", 0)
+    stats[key]["trades"].append(ret)
+    if ret > 0:
+        stats[key]["wins"] += 1
 
-    result = []
-    for (ticker, strategy), v in stats.items():
-        n       = len(v["trades"])
-        wr      = round(v["wins"] / n * 100, 1) if n else 0
-        avg     = round(sum(v["trades"]) / n, 1) if n else 0
-        best    = round(max(v["trades"]), 1) if n else 0
-        worst   = round(min(v["trades"]), 1) if n else 0
-        verdict = "trade" if wr >= 45 else "caution" if wr >= 30 else "skip"
-        result.append({
-            "ticker": ticker, "strategy": strategy,
-            "trades": n, "win_rate": wr, "avg_ret": avg,
-            "best": best, "worst": worst, "verdict": verdict,
-        })
+result = []
+for (ticker, strategy), v in stats.items():
+    n       = len(v["trades"])
+    wr      = round(v["wins"] / n * 100, 1) if n else 0
+    avg     = round(sum(v["trades"]) / n, 1) if n else 0
+    best    = round(max(v["trades"]), 1) if n else 0
+    worst   = round(min(v["trades"]), 1) if n else 0
+    verdict = "trade" if wr >= 45 else "caution" if wr >= 30 else "skip"
+    result.append({
+        "ticker": ticker, "strategy": strategy,
+        "trades": n, "win_rate": wr, "avg_ret": avg,
+        "best": best, "worst": worst, "verdict": verdict,
+    })
 
-    result.sort(key=lambda x: (x["strategy"], -x["win_rate"]))
-    return jsonify(result)
+result.sort(key=lambda x: (x["strategy"], -x["win_rate"]))
+return jsonify(result)
+```
 
-@app.route("/api/market-report")
+@app.route(”/api/market-report”)
 def api_market_report():
-    """Fetch S&P 500 and VIX data to give market context for today's signals."""
-    try:
-        # S&P 500
-        spy = yf.download("SPY", period="60d", auto_adjust=False, progress=False)
-        if isinstance(spy.columns, pd.MultiIndex):
-            spy.columns = spy.columns.get_level_values(0)
-        spy_close = _ensure_series(spy["Close"]).astype(float)
-        spy_price = float(spy_close.iloc[-1])
-        spy_ma20  = float(spy_close.rolling(20).mean().iloc[-1])
-        spy_ma50  = float(spy_close.rolling(50).mean().iloc[-1])
-        spy_1d    = round((spy_price - float(spy_close.iloc[-2])) / float(spy_close.iloc[-2]) * 100, 2)
-        spy_5d    = round((spy_price - float(spy_close.iloc[-6])) / float(spy_close.iloc[-6]) * 100, 2)
-        spy_above_ma20 = spy_price > spy_ma20
-        spy_above_ma50 = spy_price > spy_ma50
-        spy_rsi   = round(float(calc_rsi(spy_close).iloc[-1]), 1)
+“”“Fetch S&P 500 and VIX data to give market context for today’s signals.”””
+try:
+# S&P 500
+spy = yf.download(“SPY”, period=“60d”, auto_adjust=False, progress=False)
+if isinstance(spy.columns, pd.MultiIndex):
+spy.columns = spy.columns.get_level_values(0)
+spy_close = _ensure_series(spy[“Close”]).astype(float)
+spy_price = float(spy_close.iloc[-1])
+spy_ema21 = float(spy_close.ewm(span=21, adjust=False).mean().iloc[-1])
+spy_ema50 = float(spy_close.ewm(span=50, adjust=False).mean().iloc[-1])
+spy_1d    = round((spy_price - float(spy_close.iloc[-2])) / float(spy_close.iloc[-2]) * 100, 2)
+spy_5d    = round((spy_price - float(spy_close.iloc[-6])) / float(spy_close.iloc[-6]) * 100, 2)
+spy_above_ma20 = spy_price > spy_ema21   # using 21 EMA
+spy_above_ma50 = spy_price > spy_ema50
+spy_rsi   = round(float(calc_rsi(spy_close).iloc[-1]), 1)
 
-        # VIX (fear index)
-        vix_df    = yf.download("^VIX", period="10d", auto_adjust=False, progress=False)
-        if isinstance(vix_df.columns, pd.MultiIndex):
-            vix_df.columns = vix_df.columns.get_level_values(0)
-        vix       = round(float(_ensure_series(vix_df["Close"]).iloc[-1]), 1)
+```
+    # VIX (fear index)
+    vix_df    = yf.download("^VIX", period="10d", auto_adjust=False, progress=False)
+    if isinstance(vix_df.columns, pd.MultiIndex):
+        vix_df.columns = vix_df.columns.get_level_values(0)
+    vix       = round(float(_ensure_series(vix_df["Close"]).iloc[-1]), 1)
 
-        # Market condition verdict
-        if not spy_above_ma20:
-            condition = "bearish"
-            condition_detail = "S&P below MA20 — market in downtrend. Consider skipping signals today."
-        elif vix > 30:
-            condition = "volatile"
-            condition_detail = f"VIX at {vix} — high fear. Options premiums are expensive. Trade smaller."
-        elif vix > 20:
-            condition = "caution"
-            condition_detail = f"VIX at {vix} — elevated volatility. Signals can work but size down."
-        elif spy_above_ma20 and spy_above_ma50 and spy_1d > 0:
-            condition = "bullish"
-            condition_detail = "Market trending up. Good conditions for call signals."
-        else:
-            condition = "neutral"
-            condition_detail = "Market conditions are mixed. Follow signals but keep size small."
+    # Market condition verdict
+    if not spy_above_ma20:
+        condition = "bearish"
+        condition_detail = f"⛔ SPY below 21 EMA (${spy_ema21:.2f}) — market in downtrend. Call signals are suppressed today."
+    elif vix > 30:
+        condition = "volatile"
+        condition_detail = f"VIX at {vix} — high fear. Options premiums are expensive. Trade smaller."
+    elif vix > 20:
+        condition = "caution"
+        condition_detail = f"VIX at {vix} — elevated volatility. Signals can work but size down."
+    elif spy_above_ma20 and spy_above_ma50 and spy_1d > 0:
+        condition = "bullish"
+        condition_detail = f"✅ SPY above 21 EMA (${spy_ema21:.2f}) and 50 EMA — good conditions for call signals."
+    else:
+        condition = "neutral"
+        condition_detail = f"SPY above 21 EMA (${spy_ema21:.2f}) but mixed conditions. Follow signals but keep size small."
 
-        return jsonify({
-            "spy_price":     round(spy_price, 2),
-            "spy_ma20":      round(spy_ma20, 2),
-            "spy_ma50":      round(spy_ma50, 2),
-            "spy_1d":        spy_1d,
-            "spy_5d":        spy_5d,
-            "spy_above_ma20": spy_above_ma20,
-            "spy_above_ma50": spy_above_ma50,
-            "spy_rsi":       spy_rsi,
-            "vix":           vix,
-            "condition":     condition,
-            "condition_detail": condition_detail,
-        })
-    except Exception as e:
-        log.warning(f"market_report: {e}")
-        return jsonify({"error": str(e)}), 500
+    return jsonify({
+        "spy_price":      round(spy_price, 2),
+        "spy_ema21":      round(spy_ema21, 2),
+        "spy_ema50":      round(spy_ema50, 2),
+        "spy_1d":         spy_1d,
+        "spy_5d":         spy_5d,
+        "spy_above_ma20": spy_above_ma20,
+        "spy_above_ma50": spy_above_ma50,
+        "spy_rsi":        spy_rsi,
+        "vix":            vix,
+        "condition":      condition,
+        "condition_detail": condition_detail,
+    })
+except Exception as e:
+    log.warning(f"market_report: {e}")
+    return jsonify({"error": str(e)}), 500
+```
 
-@app.route("/api/stock-summary/<ticker>/<strategy>")
+@app.route(”/api/stock-summary/<ticker>/<strategy>”)
 def api_stock_summary(ticker, strategy):
-    """Full summary for a single ticker+strategy combo."""
-    try:
-        live_trades = load_json(TRADES_FILE, [])
-        bt_data     = load_json(BACKTEST_FILE, None)
-        bt_trades   = bt_data.get("trades", []) if bt_data else []
+“”“Full summary for a single ticker+strategy combo.”””
+try:
+live_trades = load_json(TRADES_FILE, [])
+bt_data     = load_json(BACKTEST_FILE, None)
+bt_trades   = bt_data.get(“trades”, []) if bt_data else []
 
-        # Filter by ticker AND strategy
-        all_closed = [t for t in live_trades + bt_trades
-                      if t.get("status") == "closed"
-                      and t.get("ticker") == ticker
-                      and t.get("strategy") == strategy]
-        all_closed.sort(key=lambda t: t.get("exit_date",""))
+```
+    # Filter by ticker AND strategy
+    all_closed = [t for t in live_trades + bt_trades
+                  if t.get("status") == "closed"
+                  and t.get("ticker") == ticker
+                  and t.get("strategy") == strategy]
+    all_closed.sort(key=lambda t: t.get("exit_date",""))
 
-        n        = len(all_closed)
-        returns  = [t.get("return_pct", 0) for t in all_closed]
-        wins     = [r for r in returns if r > 0]
-        win_rate = round(len(wins)/n*100, 1) if n else 0
-        avg_ret  = round(sum(returns)/n, 1) if n else 0
-        last5    = all_closed[-5:] if n >= 5 else all_closed
+    n        = len(all_closed)
+    returns  = [t.get("return_pct", 0) for t in all_closed]
+    wins     = [r for r in returns if r > 0]
+    win_rate = round(len(wins)/n*100, 1) if n else 0
+    avg_ret  = round(sum(returns)/n, 1) if n else 0
+    last5    = all_closed[-5:] if n >= 5 else all_closed
 
-        # Today's signal
-        today_str = str(date.today())
-        signals   = load_json(SIGNALS_FILE, [])
-        today_sig = next((s for s in signals
-                          if s.get("ticker")==ticker
-                          and s.get("strategy")==strategy
-                          and s.get("date")==today_str), None)
+    # Today's signal
+    today_str = str(date.today())
+    signals   = load_json(SIGNALS_FILE, [])
+    today_sig = next((s for s in signals
+                      if s.get("ticker")==ticker
+                      and s.get("strategy")==strategy
+                      and s.get("date")==today_str), None)
 
-        # Strategy-specific confidence score
-        score = 5
-        if today_sig and today_sig.get("is_buy"):
-            if strategy == "CALL+HEDGE":
-                if today_sig.get("pullback_pct", 0) >= 4:  score += 1
-                if today_sig.get("pullback_pct", 0) >= 6:  score += 1
-                rsi = today_sig.get("rsi", 50)
-                if 40 <= rsi <= 60:                         score += 1
-                if today_sig.get("vol_ratio", 1) >= 1.2:   score += 1
-                if win_rate >= 60:                          score += 1
-            else:  # STRADDLE
-                days_to_earn = today_sig.get("days_to_earnings", 99)
-                if days_to_earn <= 4:                       score += 2  # closer = better
-                elif days_to_earn <= 6:                     score += 1
-                vol_range = today_sig.get("vol_range_pct", 0)
-                if 4 <= vol_range <= 8:                     score += 2  # sweet spot
-                elif vol_range < 4:                         score -= 1  # too quiet
-                if win_rate >= 55:                          score += 1
-            score = min(max(score, 0), 10)
-        elif today_sig and not today_sig.get("is_buy"):
-            score = 0
+    # Strategy-specific confidence score
+    score = 5
+    if today_sig and today_sig.get("is_buy"):
+        if strategy == "CALL+HEDGE":
+            if today_sig.get("pullback_pct", 0) >= 4:  score += 1
+            if today_sig.get("pullback_pct", 0) >= 6:  score += 1
+            rsi = today_sig.get("rsi", 50)
+            if 40 <= rsi <= 60:                         score += 1
+            if today_sig.get("vol_ratio", 1) >= 1.2:   score += 1
+            if win_rate >= 60:                          score += 1
+        else:  # STRADDLE
+            days_to_earn = today_sig.get("days_to_earnings", 99)
+            if days_to_earn <= 4:                       score += 2  # closer = better
+            elif days_to_earn <= 6:                     score += 1
+            vol_range = today_sig.get("vol_range_pct", 0)
+            if 4 <= vol_range <= 8:                     score += 2  # sweet spot
+            elif vol_range < 4:                         score -= 1  # too quiet
+            if win_rate >= 55:                          score += 1
+        score = min(max(score, 0), 10)
+    elif today_sig and not today_sig.get("is_buy"):
+        score = 0
 
-        # Straddle-specific: breakeven move needed
-        breakeven_pct = None
-        if strategy == "STRADDLE" and today_sig:
-            breakeven_pct = round(STRAD_COST_PCT * 100, 1)  # need > 8% move to profit
+    # Straddle-specific: breakeven move needed
+    breakeven_pct = None
+    if strategy == "STRADDLE" and today_sig:
+        breakeven_pct = round(STRAD_COST_PCT * 100, 1)  # need > 8% move to profit
 
-        return jsonify({
-            "ticker":         ticker,
-            "strategy":       strategy,
-            "n_trades":       n,
-            "win_rate":       win_rate,
-            "avg_ret":        avg_ret,
-            "best":           round(max(returns), 1) if returns else 0,
-            "worst":          round(min(returns), 1) if returns else 0,
-            "last5":          [{"exit_date": t.get("exit_date",""),
-                                "return_pct": t.get("return_pct",0),
-                                "entry_price": t.get("entry_price",0),
-                                "exit_price": t.get("exit_price",0)} for t in last5],
-            "today_signal":   today_sig,
-            "confidence":     score,
-            "breakeven_pct":  breakeven_pct,
-        })
-    except Exception as e:
-        log.warning(f"stock_summary {ticker}/{strategy}: {e}")
-        return jsonify({"error": str(e)}), 500
-
+    return jsonify({
+        "ticker":         ticker,
+        "strategy":       strategy,
+        "n_trades":       n,
+        "win_rate":       win_rate,
+        "avg_ret":        avg_ret,
+        "best":           round(max(returns), 1) if returns else 0,
+        "worst":          round(min(returns), 1) if returns else 0,
+        "last5":          [{"exit_date": t.get("exit_date",""),
+                            "return_pct": t.get("return_pct",0),
+                            "entry_price": t.get("entry_price",0),
+                            "exit_price": t.get("exit_price",0)} for t in last5],
+        "today_signal":   today_sig,
+        "confidence":     score,
+        "breakeven_pct":  breakeven_pct,
+    })
+except Exception as e:
+    log.warning(f"stock_summary {ticker}/{strategy}: {e}")
+    return jsonify({"error": str(e)}), 500
+```
 
 def api_hedge_alerts():
-    trades     = load_json(TRADES_FILE, [])
-    open_calls = [t for t in trades
-                  if t.get("status")=="open" and t.get("strategy")=="CALL+HEDGE"]
-    alerts = []
-    for t in open_calls:
-        current = get_current_price(t["ticker"])
-        if current is None: continue
-        ep        = t["entry_price"]
-        call_cost = t.get("call_cost_pct", CALL_COST_PCT) * ep
-        call_gain = max(0.0, current - ep)
-        gain_pct  = (call_gain / call_cost * 100) if call_cost > 0 else 0
-        if gain_pct >= 20:
-            alerts.append({
-                "ticker":        t["ticker"],
-                "entry_price":   ep,
-                "current_price": round(current, 2),
-                "gain_pct":      round(gain_pct, 1),
-                "entry_date":    t["entry_date"],
-                "message":       (f"{t['ticker']} call is up {gain_pct:.0f}% — "
-                                  f"buy a PUT now to lock in your profit"),
-            })
-    return jsonify(alerts)
+trades     = load_json(TRADES_FILE, [])
+open_calls = [t for t in trades
+if t.get(“status”)==“open” and t.get(“strategy”)==“CALL+HEDGE”]
+alerts = []
+for t in open_calls:
+current = get_current_price(t[“ticker”])
+if current is None: continue
+ep        = t[“entry_price”]
+call_cost = t.get(“call_cost_pct”, CALL_COST_PCT) * ep
+call_gain = max(0.0, current - ep)
+gain_pct  = (call_gain / call_cost * 100) if call_cost > 0 else 0
+if gain_pct >= 20:
+alerts.append({
+“ticker”:        t[“ticker”],
+“entry_price”:   ep,
+“current_price”: round(current, 2),
+“gain_pct”:      round(gain_pct, 1),
+“entry_date”:    t[“entry_date”],
+“message”:       (f”{t[‘ticker’]} call is up {gain_pct:.0f}% — “
+f”buy a PUT now to lock in your profit”),
+})
+return jsonify(alerts)
 
 # ── HTML ──────────────────────────────────────────────────────────────────────
 
-HTML = r"""<!DOCTYPE html>
+HTML = r”””<!DOCTYPE html>
+
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -1081,6 +1224,7 @@ body{min-height:100vh;padding-bottom:calc(env(safe-area-inset-bottom) + 16px);}
     <input type="date" id="dpick" onchange="loadSignals(this.value)"></div>
 
   <!-- Market Report -->
+
   <div id="market-report" style="margin:0 20px 14px;background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:14px 16px;">
     <div style="font-size:11px;color:var(--muted);font-family:var(--mono);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Market conditions</div>
     <div id="market-body"><div style="font-size:12px;color:var(--muted);font-family:var(--mono)">Loading…</div></div>
@@ -1156,60 +1300,63 @@ body{min-height:100vh;padding-bottom:calc(env(safe-area-inset-bottom) + 16px);}
 <div id="tab-howto" style="display:none">
   <div class="howto">
 
-    <div class="howto-card">
-      <div class="howto-head">Your daily routine</div>
-      <div class="howto-step"><div class="step-num">1</div><div class="step-text">Open the app each morning. If the green dot shows today's date — signals already ran at 9am automatically.<div class="step-sub">If it says "Never run" or yesterday — tap Run ↗ and wait 60 seconds.</div></div></div>
-      <div class="howto-step"><div class="step-num">2</div><div class="step-text">Check the Today tab. Ignore all gray cards. Only act on green <span class="badge-green">BUY</span> cards.</div></div>
-      <div class="howto-step"><div class="step-num">3</div><div class="step-text">Tap any BUY card to see the full summary — win rate, last 5 trades, confidence score, and exact action steps.</div></div>
-      <div class="howto-step"><div class="step-num">4</div><div class="step-text">Check for the orange ⚡ hedge alert banner every morning. If it appears — act immediately.<div class="step-sub">This means your call is up 20%+ and it's time to buy a put to lock in profit.</div></div></div>
-      <div class="howto-step"><div class="step-num">5</div><div class="step-text">At day 10 for calls, day 5 for straddles — go close everything in your broker.<div class="step-sub">Sell regardless of where it is. Don't wait hoping it recovers.</div></div></div>
-    </div>
+```
+<div class="howto-card">
+  <div class="howto-head">Your daily routine</div>
+  <div class="howto-step"><div class="step-num">1</div><div class="step-text">Open the app each morning. If the green dot shows today's date — signals already ran at 9am automatically.<div class="step-sub">If it says "Never run" or yesterday — tap Run ↗ and wait 60 seconds.</div></div></div>
+  <div class="howto-step"><div class="step-num">2</div><div class="step-text">Check the Today tab. Ignore all gray cards. Only act on green <span class="badge-green">BUY</span> cards.</div></div>
+  <div class="howto-step"><div class="step-num">3</div><div class="step-text">Tap any BUY card to see the full summary — win rate, last 5 trades, confidence score, and exact action steps.</div></div>
+  <div class="howto-step"><div class="step-num">4</div><div class="step-text">Check for the orange ⚡ hedge alert banner every morning. If it appears — act immediately.<div class="step-sub">This means your call is up 20%+ and it's time to buy a put to lock in profit.</div></div></div>
+  <div class="howto-step"><div class="step-num">5</div><div class="step-text">At day 10 for calls, day 5 for straddles — go close everything in your broker.<div class="step-sub">Sell regardless of where it is. Don't wait hoping it recovers.</div></div></div>
+</div>
 
-    <div class="howto-card">
-      <div class="howto-head"><span class="badge-green" style="font-size:12px">CALL+HEDGE</span>&nbsp; When to trade &amp; what to do</div>
-      <div class="howto-rule" style="margin-bottom:12px">
-        <b>Trade these tickers only (proven 50%+ win rate):</b><br>
-        RIOT · HOOD · SOFI · UPST
-      </div>
-      <div class="howto-step"><div class="step-num">1</div><div class="step-text">Green BUY fires → open your broker → search the ticker<div class="step-sub">Tap Options → Calls → pick expiration 2 weeks out from today</div></div></div>
-      <div class="howto-step"><div class="step-num">2</div><div class="step-text">Pick the strike price at or just above today's stock price<div class="step-sub">RIOT at $18 → buy the $18.50 or $19 call · SOFI at $16 → buy the $16.50 or $17 call</div></div></div>
-      <div class="howto-step"><div class="step-num">3</div><div class="step-text">Buy 1 contract · risk max 1–5% of your account<div class="step-sub">$2,000 account → spend max $60–$100 on the option premium</div></div></div>
-      <div class="howto-step"><div class="step-num">4</div><div class="step-text">⚡ If the orange hedge alert fires → go buy 1 Put immediately<div class="step-sub">Same ticker · same strike · same expiration · this locks in your profit</div></div></div>
-      <div class="howto-step"><div class="step-num">5</div><div class="step-text">Day 10 → sell everything · close the call + put if you bought one<div class="step-sub">Take the result. Win or lose. Move on.</div></div></div>
-      <div class="howto-rule"><b>You win when:</b> Stock goes up more than 5% over 10 days.<br><b>You lose when:</b> Stock goes sideways or down — you lose the premium only, not more.<br><b>You protect gains when:</b> Call is up 20%+ → hedge fires → you buy the put.</div>
-    </div>
+<div class="howto-card">
+  <div class="howto-head"><span class="badge-green" style="font-size:12px">CALL+HEDGE</span>&nbsp; When to trade &amp; what to do</div>
+  <div class="howto-rule" style="margin-bottom:12px">
+    <b>Trade these tickers only (proven 50%+ win rate):</b><br>
+    RIOT · HOOD · SOFI · UPST
+  </div>
+  <div class="howto-step"><div class="step-num">1</div><div class="step-text">Green BUY fires → open your broker → search the ticker<div class="step-sub">Tap Options → Calls → pick expiration 2 weeks out from today</div></div></div>
+  <div class="howto-step"><div class="step-num">2</div><div class="step-text">Pick the strike price at or just above today's stock price<div class="step-sub">RIOT at $18 → buy the $18.50 or $19 call · SOFI at $16 → buy the $16.50 or $17 call</div></div></div>
+  <div class="howto-step"><div class="step-num">3</div><div class="step-text">Buy 1 contract · risk max 1–5% of your account<div class="step-sub">$2,000 account → spend max $60–$100 on the option premium</div></div></div>
+  <div class="howto-step"><div class="step-num">4</div><div class="step-text">⚡ If the orange hedge alert fires → go buy 1 Put immediately<div class="step-sub">Same ticker · same strike · same expiration · this locks in your profit</div></div></div>
+  <div class="howto-step"><div class="step-num">5</div><div class="step-text">Day 10 → sell everything · close the call + put if you bought one<div class="step-sub">Take the result. Win or lose. Move on.</div></div></div>
+  <div class="howto-rule"><b>You win when:</b> Stock goes up more than 5% over 10 days.<br><b>You lose when:</b> Stock goes sideways or down — you lose the premium only, not more.<br><b>You protect gains when:</b> Call is up 20%+ → hedge fires → you buy the put.</div>
+</div>
 
-    <div class="howto-card">
-      <div class="howto-head"><span class="badge-blue" style="font-size:12px">STRADDLE</span>&nbsp; When to trade &amp; what to do</div>
-      <div class="howto-rule" style="margin-bottom:12px">
-        <b>Trade these tickers only (50%+ win rate for straddles):</b><br>
-        UPST · PLTR · MARA · COIN · RIOT<br>
-        <b>Only when earnings are 3–7 days away.</b> The app signals this automatically.
-      </div>
-      <div class="howto-step"><div class="step-num">1</div><div class="step-text">Green BUY straddle fires → open your broker → search the ticker<div class="step-sub">Tap Options → pick expiration 1 week out from today</div></div></div>
-      <div class="howto-step"><div class="step-num">2</div><div class="step-text">Buy 1 Call AND 1 Put at the same strike price (at today's stock price)<div class="step-sub">UPST at $50 → buy the $50 call AND the $50 put · same expiration</div></div></div>
-      <div class="howto-step"><div class="step-num">3</div><div class="step-text">Do nothing. Let earnings happen. The stock will move.<div class="step-sub">No hedge needed — the put is already built in. Just wait.</div></div></div>
-      <div class="howto-step"><div class="step-num">4</div><div class="step-text">Day 5 → sell both the call AND the put<div class="step-sub">One will be worth a lot. The other nearly worthless. Sell both regardless.</div></div></div>
-      <div class="howto-rule"><b>You win when:</b> Stock moves more than 8% in either direction after earnings.<br><b>You lose when:</b> Stock barely moves after earnings — you lose both premiums.<br><b>Never use for TSLA or NVDA</b> — their moves are already priced into the options.</div>
-    </div>
+<div class="howto-card">
+  <div class="howto-head"><span class="badge-blue" style="font-size:12px">STRADDLE</span>&nbsp; When to trade &amp; what to do</div>
+  <div class="howto-rule" style="margin-bottom:12px">
+    <b>Trade these tickers only (50%+ win rate for straddles):</b><br>
+    UPST · PLTR · MARA · COIN · RIOT<br>
+    <b>Only when earnings are 3–7 days away.</b> The app signals this automatically.
+  </div>
+  <div class="howto-step"><div class="step-num">1</div><div class="step-text">Green BUY straddle fires → open your broker → search the ticker<div class="step-sub">Tap Options → pick expiration 1 week out from today</div></div></div>
+  <div class="howto-step"><div class="step-num">2</div><div class="step-text">Buy 1 Call AND 1 Put at the same strike price (at today's stock price)<div class="step-sub">UPST at $50 → buy the $50 call AND the $50 put · same expiration</div></div></div>
+  <div class="howto-step"><div class="step-num">3</div><div class="step-text">Do nothing. Let earnings happen. The stock will move.<div class="step-sub">No hedge needed — the put is already built in. Just wait.</div></div></div>
+  <div class="howto-step"><div class="step-num">4</div><div class="step-text">Day 5 → sell both the call AND the put<div class="step-sub">One will be worth a lot. The other nearly worthless. Sell both regardless.</div></div></div>
+  <div class="howto-rule"><b>You win when:</b> Stock moves more than 8% in either direction after earnings.<br><b>You lose when:</b> Stock barely moves after earnings — you lose both premiums.<br><b>Never use for TSLA or NVDA</b> — their moves are already priced into the options.</div>
+</div>
 
-    <div class="howto-card">
-      <div class="howto-head">Golden rules</div>
-      <div class="howto-rule">
-        <b>Never risk more than 1–5%</b> of your account per trade. $2,000 account = $60–$100 max per trade.<br><br>
-        <b>Call+Hedge green tickers:</b> RIOT · HOOD · SOFI · UPST<br>
-        <b>Straddle green tickers:</b> UPST · PLTR · MARA · COIN · RIOT<br><br>
-        <b>Always close on time</b> — day 10 for calls, day 5 for straddles. No exceptions.<br><br>
-        <b>The app never touches your money</b> — it only tells you when. You place the trade yourself.<br><br>
-        <b>-100% means the option expired worthless</b> — you lost the premium only, not your whole account. Premium = roughly 5% of stock price per share.
-      </div>
-    </div>
+<div class="howto-card">
+  <div class="howto-head">Golden rules</div>
+  <div class="howto-rule">
+    <b>Never risk more than 1–5%</b> of your account per trade. $2,000 account = $60–$100 max per trade.<br><br>
+    <b>Call+Hedge green tickers:</b> RIOT · HOOD · SOFI · UPST<br>
+    <b>Straddle green tickers:</b> UPST · PLTR · MARA · COIN · RIOT<br><br>
+    <b>Always close on time</b> — day 10 for calls, day 5 for straddles. No exceptions.<br><br>
+    <b>The app never touches your money</b> — it only tells you when. You place the trade yourself.<br><br>
+    <b>-100% means the option expired worthless</b> — you lost the premium only, not your whole account. Premium = roughly 5% of stock price per share.
+  </div>
+</div>
+```
 
   </div>
   <div style="height:20px"></div>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+
 <script>
 let liveChart=null, btChart=null;
 const today=new Date().toISOString().slice(0,10);
@@ -1267,11 +1414,11 @@ async function loadMarketReport(){
         <span style="font-size:12px;color:var(--muted);font-family:var(--mono)">SPY $${m.spy_price} · 
           <span style="color:${spy1dCol}">${m.spy_1d>=0?'+':''}${m.spy_1d}% today</span> · 
           <span style="color:${spy5dCol}">${m.spy_5d>=0?'+':''}${m.spy_5d}% 5d</span> · 
-          VIX ${m.vix} · RSI ${m.spy_rsi}</span>
+          21 EMA $${m.spy_ema21} · VIX ${m.vix} · RSI ${m.spy_rsi}</span>
       </div>
       <div style="display:flex;gap:6px;margin-bottom:8px">
-        <span style="font-size:10px;font-family:var(--mono);padding:2px 8px;border-radius:4px;${m.spy_above_ma20?'background:#14532d;color:#86efac':'background:#450a0a;color:#fca5a5'}">MA20 ${m.spy_above_ma20?'✓':'✗'}</span>
-        <span style="font-size:10px;font-family:var(--mono);padding:2px 8px;border-radius:4px;${m.spy_above_ma50?'background:#14532d;color:#86efac':'background:#450a0a;color:#fca5a5'}">MA50 ${m.spy_above_ma50?'✓':'✗'}</span>
+        <span style="font-size:10px;font-family:var(--mono);padding:2px 8px;border-radius:4px;${m.spy_above_ma20?'background:#14532d;color:#86efac':'background:#450a0a;color:#fca5a5'}">EMA21 ${m.spy_above_ma20?'✓ above':'✗ below'}</span>
+        <span style="font-size:10px;font-family:var(--mono);padding:2px 8px;border-radius:4px;${m.spy_above_ma50?'background:#14532d;color:#86efac':'background:#450a0a;color:#fca5a5'}">EMA50 ${m.spy_above_ma50?'✓':'✗'}</span>
         <span style="font-size:10px;font-family:var(--mono);padding:2px 8px;border-radius:4px;${m.vix<20?'background:#14532d;color:#86efac':m.vix>30?'background:#450a0a;color:#fca5a5':'background:#451a03;color:#fcd34d'}">VIX ${m.vix<20?'LOW':m.vix>30?'HIGH':'ELEVATED'}</span>
       </div>
       <div style="font-size:12px;color:var(--muted);font-family:var(--mono)">${m.condition_detail}</div>`;
@@ -1434,18 +1581,36 @@ async function loadTrades(){
   const trades=await(await fetch('/api/trades')).json();
   const open=trades.filter(t=>t.status==='open');
   const closed=trades.filter(t=>t.status==='closed').reverse();
-  const td=new Date().toISOString().slice(0,10);
+
+  // Fetch earnings warnings for open call trades
+  let earningsWarnings={};
+  try{
+    const ew=await(await fetch('/api/earnings-warnings')).json();
+    ew.forEach(w=>{earningsWarnings[w.ticker]=w;});
+  }catch(e){}
+
   document.getElementById('openlist').innerHTML=!open.length?'<div class="empty">No open trades.</div>':
     open.map(t=>{
-      const held = tradingDaysElapsed(t.entry_date);
-      const pct  = Math.min(held/t.hold_days*100,100);
-      return `<div class="card">
-        <div class="cdot" style="background:var(--amber);margin-top:6px"></div>
+      const held=tradingDaysElapsed(t.entry_date);
+      const pct=Math.min(held/t.hold_days*100,100);
+      const warn=t.strategy==='CALL+HEDGE'?earningsWarnings[t.ticker]:null;
+      const warnHtml=warn?`
+        <div style="margin-top:8px;padding:6px 10px;background:#431407;border-radius:6px;border:0.5px solid #f97316;font-size:11px;color:#fdba74;font-family:var(--mono);line-height:1.6">
+          ⚠️ ${warn.ticker} earnings in ${warn.days_to_earnings} day${warn.days_to_earnings!==1?'s':''} (${warn.earnings_date})<br>
+          <span style="color:#fb923c;font-weight:500">Close this call NOW — IV crush will hit after earnings</span>
+        </div>`:'';
+      const dotColor=warn?'#f97316':held>=t.hold_days?'#ef4444':'var(--amber)';
+      return `<div class="card" style="${warn?'border-color:#7c2d12;background:#1a0a00':''}">
+        <div class="cdot" style="background:${dotColor};margin-top:6px;${warn?'box-shadow:0 0 6px #f97316':''}"></div>
         <div class="cbody">
           <div class="ctop"><span class="cticker">${t.ticker}</span>
-            <span class="tag ${t.strategy==='STRADDLE'?'ts':'tc'}">${t.strategy}</span></div>
+            <span class="tag ${t.strategy==='STRADDLE'?'ts':'tc'}">${t.strategy}</span>
+            ${held>=t.hold_days?'<span class="tag" style="background:#ef4444;color:#fff;font-size:10px">CLOSE TODAY</span>':''}
+            ${warn?'<span class="tag" style="background:#f97316;color:#000;font-size:10px">⚠️ EARNINGS</span>':''}
+          </div>
           <div class="cdet">Entry ${t.entry_date} · $${parseFloat(t.entry_price).toFixed(2)} · day ${held}/${t.hold_days}</div>
-          <div class="bwrap"><div class="bfill" style="width:${pct}%;background:var(--amber)"></div></div>
+          <div class="bwrap"><div class="bfill" style="width:${pct}%;background:${dotColor}"></div></div>
+          ${warnHtml}
         </div></div>`;
     }).join('');
   document.getElementById('closedlist').innerHTML=!closed.length?'<div class="empty">No closed trades yet.</div>':
@@ -1674,14 +1839,16 @@ loadAll();
 setInterval(loadStatus,15000);
 setInterval(loadHedgeAlerts,60000);
 setInterval(loadMarketReport,300000);
+setInterval(loadTrades,300000);
 </script>
+
 </body>
 </html>"""
 
-@app.route("/")
+@app.route(”/”)
 def index():
-    return render_template_string(HTML)
+return render_template_string(HTML)
 
-if __name__=="__main__":
-    port=int(os.environ.get("PORT",5000))
-    app.run(host="0.0.0.0",port=port,debug=False)
+if **name**==”**main**”:
+port=int(os.environ.get(“PORT”,5000))
+app.run(host=“0.0.0.0”,port=port,debug=False)
